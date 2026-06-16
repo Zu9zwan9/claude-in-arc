@@ -1,0 +1,29 @@
+{
+  "name": "claude-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-first Claude copilot side panel for Chromium browsers including Arc (Phase 1, M1 scaffold). Unofficial; not affiliated with Anthropic or The Browser Company.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/chrome": "^0.1.43",
+    "@types/node": "^25.9.3",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
+    "prettier": "^3.8.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^4.1.9"
+  }
+}

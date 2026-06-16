@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Agent — Phase 1</title>
+    <link rel="stylesheet" href="./sidepanel.css" />
+  </head>
+  <body>
+    <main class="panel" aria-label="Claude Agent panel">
+      <header class="panel__header">
+        <h1 class="panel__title">Claude Agent</h1>
+        <span class="panel__badge" title="Early scaffold milestone"
+          >Phase 1 · M1</span
+        >
+      </header>
+
+      <section class="panel__body" aria-label="Conversation">
+        <div class="placeholder" role="note">
+          <p class="placeholder__lead">
+            Read-first Claude copilot — early scaffold.
+          </p>
+          <p>
+            This is the M1 shell. It opens reliably in both Chrome (native side
+            panel) and Arc (popup fallback). There are no model calls, page
+            reads, or actions yet — those arrive in later milestones behind the
+            <strong>observe → plan → consent → act</strong> safety loop.
+          </p>
+        </div>
+      </section>
+
+      <footer class="panel__footer">
+        <label class="composer" aria-label="Message Claude (disabled in M1)">
+          <textarea
+            class="composer__input"
+            placeholder="Chat is not enabled yet (M1 scaffold)…"
+            rows="2"
+            disabled
+            aria-disabled="true"
+          ></textarea>
+          <button
+            class="composer__send"
+            type="button"
+            disabled
+            aria-disabled="true"
+          >
+            Send
+          </button>
+        </label>
+        <p class="disclaimer">
+          Unofficial · community-built · not affiliated with or endorsed by
+          Anthropic or The Browser Company.
+        </p>
+      </footer>
+    </main>
+
+    <script type="module" src="./sidepanel.js"></script>
+  </body>
+</html>

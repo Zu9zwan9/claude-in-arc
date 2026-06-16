@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Agent (Phase 1, unofficial)",
+  "version": "0.1.0",
+  "description": "Read-first Claude copilot side panel for Chromium browsers, including Arc (popup fallback). M1 scaffold — no model calls yet. Unofficial; not affiliated with Anthropic or The Browser Company.",
+  "minimum_chrome_version": "114",
+  "action": {
+    "default_title": "Open Claude Agent panel"
+  },
+  "background": {
+    "service_worker": "background/index.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel"]
+}
