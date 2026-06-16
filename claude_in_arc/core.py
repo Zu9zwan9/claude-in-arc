@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 
 # Product identity (cohesive voice across CLI + docs).
 PRODUCT_NAME = "Claude in Arc"
@@ -93,6 +93,31 @@ SHIM_SOURCE = ASSETS_DIR / SHIM_FILENAME
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "claude-in-arc"
 LOG_FILE = LOG_DIR / "claude-in-arc.log"
+
+# Chromium extension location enum (extensions::Manifest::Location).
+LOCATION_COMPONENT = 0
+LOCATION_EXTERNAL_PREF = 1
+LOCATION_EXTERNAL_REGISTRY = 2
+LOCATION_UNPACKED = 4
+LOCATION_INTERNAL = 5
+LOCATION_EXTERNAL_PREF_DOWNLOAD = 8
+LOCATION_EXTERNAL_POLICY_DOWNLOAD = 9
+LOCATION_COMMAND_LINE = 10
+LOCATION_EXTERNAL_POLICY = 11
+LOCATION_EXTERNAL_COMPONENT = 12
+
+LOCATION_LABELS = {
+    LOCATION_COMPONENT: "component",
+    LOCATION_EXTERNAL_PREF: "web store",
+    LOCATION_EXTERNAL_REGISTRY: "registry",
+    LOCATION_UNPACKED: "unpacked (Load unpacked)",
+    LOCATION_INTERNAL: "internal",
+    LOCATION_EXTERNAL_PREF_DOWNLOAD: "web store (download)",
+    LOCATION_EXTERNAL_POLICY_DOWNLOAD: "policy (download)",
+    LOCATION_COMMAND_LINE: "command line",
+    LOCATION_EXTERNAL_POLICY: "policy",
+    LOCATION_EXTERNAL_COMPONENT: "external component",
+}
 
 # Exit codes.
 EXIT_OK = 0
@@ -784,25 +809,137 @@ def arc_has_store_extension() -> bool:
     return False
 
 
-def arc_has_patched_build_loaded() -> bool:
-    """Best-effort: detect if our unpacked build is referenced by Arc's prefs."""
+@dataclass
+class ArcExtensionState:
+    """Parsed Arc registration for the official Claude extension id."""
+
+    registered: bool = False
+    path: Optional[str] = None
+    location: Optional[int] = None
+    from_webstore: Optional[bool] = None
+    disabled: bool = False
+    service_worker: Optional[str] = None
+    is_patched_path: bool = False
+    has_patch_marker: bool = False
+    store_copy_on_disk: bool = False
+    store_versions: List[str] = field(default_factory=list)
+    conflict: bool = False
+    conflict_detail: str = ""
+
+    @property
+    def location_label(self) -> str:
+        if self.location is None:
+            return "unknown"
+        return LOCATION_LABELS.get(self.location, f"location {self.location}")
+
+
+def _arc_extension_settings() -> Optional[Dict]:
+    """Read the Claude extension entry from Arc's Secure Preferences / Preferences."""
     arc = arc_browser()
     if arc is None or not arc.data_dir.is_dir():
-        return False
-    needle = str(BUILD_EXTENSION_DIR)
-    for pref in arc.data_dir.glob("*/Secure Preferences"):
-        try:
-            if needle in pref.read_text(encoding="utf-8", errors="ignore"):
-                return True
-        except OSError:
+        return None
+    for pref_name in ("Default/Secure Preferences", "Default/Preferences"):
+        pref = arc.data_dir / pref_name
+        if not pref.is_file():
             continue
-    for pref in arc.data_dir.glob("*/Preferences"):
         try:
-            if needle in pref.read_text(encoding="utf-8", errors="ignore"):
-                return True
-        except OSError:
+            data = json.loads(pref.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
             continue
-    return False
+        ext = (data.get("extensions") or {}).get("settings", {}).get(OFFICIAL_EXTENSION_ID)
+        if ext:
+            return ext
+    return None
+
+
+def _store_versions_on_disk() -> List[str]:
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return []
+    versions: List[str] = []
+    for ext_root in arc.data_dir.glob(f"*/Extensions/{OFFICIAL_EXTENSION_ID}"):
+        if not ext_root.is_dir():
+            continue
+        for version_dir in ext_root.iterdir():
+            if version_dir.is_dir() and (version_dir / "manifest.json").is_file():
+                versions.append(version_dir.name)
+    return sorted(set(versions))
+
+
+def inspect_arc_extension() -> ArcExtensionState:
+    """Inspect how Arc has registered the Claude extension (best effort)."""
+    state = ArcExtensionState()
+    state.store_copy_on_disk = arc_has_store_extension()
+    state.store_versions = _store_versions_on_disk()
+
+    ext = _arc_extension_settings()
+    if not ext:
+        if state.store_copy_on_disk:
+            state.registered = True
+            state.conflict = True
+            state.conflict_detail = (
+                "Arc has a Store copy on disk but no active registration in preferences."
+            )
+        return state
+
+    state.registered = True
+    state.path = ext.get("path")
+    state.location = ext.get("location")
+    state.from_webstore = ext.get("from_webstore")
+    state.disabled = bool(ext.get("disable_reasons"))
+
+    manifest = ext.get("manifest") or {}
+    if isinstance(manifest, dict):
+        bg = manifest.get("background") or {}
+        state.service_worker = bg.get("service_worker")
+
+    build_path = str(BUILD_EXTENSION_DIR.resolve())
+    registered_path = state.path or ""
+    state.is_patched_path = registered_path == build_path or build_path in registered_path
+    if state.is_patched_path and BUILD_EXTENSION_DIR.is_dir():
+        state.has_patch_marker = (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).is_file()
+        try:
+            disk_manifest = _read_manifest(BUILD_EXTENSION_DIR)
+            state.service_worker = (
+                (disk_manifest.get("background") or {}).get("service_worker")
+                or state.service_worker
+            )
+        except (ValueError, OSError):
+            pass
+
+    same_id_store_on_disk = state.store_copy_on_disk and not state.is_patched_path
+    dual_install = (
+        state.is_patched_path
+        and state.store_copy_on_disk
+        and read_state().get("new_id") is not True
+    )
+    if same_id_store_on_disk:
+        state.conflict = True
+        state.conflict_detail = (
+            "Arc is running the Store copy, not the patched build at "
+            f"{BUILD_EXTENSION_DIR}."
+        )
+    elif dual_install:
+        state.conflict = True
+        state.conflict_detail = (
+            "The patched build is loaded, but a Store copy still exists on disk "
+            f"({', '.join(state.store_versions) or 'unknown version'}). With the same "
+            "extension id, remove the Store copy from arc://extensions to avoid "
+            "Arc serving stale files on reload/update."
+        )
+    return state
+
+
+def arc_has_patched_build_loaded() -> bool:
+    """True when Arc's prefs point at our patched build with a valid patch marker."""
+    state = inspect_arc_extension()
+    return state.is_patched_path and state.has_patch_marker and not state.disabled
+
+
+def arc_extension_conflict() -> Tuple[bool, str]:
+    """Return (has_conflict, human-readable detail)."""
+    state = inspect_arc_extension()
+    return state.conflict, state.conflict_detail
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +978,25 @@ def _reveal_in_finder(path: Path) -> bool:
 # Commands
 # ---------------------------------------------------------------------------
 
+def _print_conflict_fix(state: ArcExtensionState, *, include_detail: bool = True) -> None:
+    if not state.conflict:
+        return
+    if include_detail:
+        warn(state.conflict_detail)
+    if state.is_patched_path and state.store_copy_on_disk:
+        info(
+            f"In {Style.cyan('arc://extensions')}, {Style.bold('Remove')} the Store "
+            "copy of Claude (keep the unpacked entry pointing at ClaudeInArc)."
+        )
+        detail("Or rebuild with --new-id if you intentionally want both copies.")
+    elif not state.is_patched_path:
+        info(
+            f"In {Style.cyan('arc://extensions')}, {Style.bold('Remove')} the Store "
+            "copy, then Load unpacked →"
+        )
+        detail(str(BUILD_EXTENSION_DIR))
+
+
 def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> None:
     heading("One step left")
     say("  Chromium asks you to load an unpacked extension yourself — a deliberate")
@@ -848,10 +1004,11 @@ def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> 
     say("")
 
     needs_removal = build.extension_id_preserved and arc_has_store_extension()
+    arc_state = inspect_arc_extension()
     if needs_removal:
         warn("Arc already has the Store copy of Claude. This build shares the official")
-        detail("id, so Arc loads only one. Re-run with --new-id to keep both, or remove")
-        detail("the Store copy in the steps below — your choice.")
+        detail("id, so only one copy can be active. Remove the Store copy below — or")
+        detail("re-run with --new-id to keep both (Claude Desktop integration differs).")
         say("")
 
     n = 1
@@ -863,6 +1020,9 @@ def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> 
     if needs_removal:
         step(n, f"Remove the existing {Style.bold('Claude')} extension (the Store copy).")
         n += 1
+    elif arc_state.conflict:
+        _print_conflict_fix(arc_state)
+        say("")
     step(n, f"Turn on {Style.bold('Developer mode')} — top-right toggle.")
     n += 1
     step(n, f"Click {Style.bold('Load unpacked')} and choose:")
@@ -899,6 +1059,33 @@ def cmd_install(args: argparse.Namespace) -> int:
     if args.dry_run:
         warn("Dry run — nothing was written.")
         return EXIT_OK
+
+    arc_state = inspect_arc_extension()
+    if build.extension_id_preserved and not getattr(args, "ignore_conflict", False):
+        if arc_state.store_copy_on_disk and not arc_state.is_patched_path:
+            heading("Store copy conflict")
+            fail(
+                "Arc is still running the Chrome Web Store copy of Claude, not the\n"
+                "    patched build. Toolbar clicks will not work until you load the\n"
+                "    patched build and remove the Store copy."
+            )
+            _print_conflict_fix(arc_state)
+            say("")
+            info("Fix options:")
+            detail("1. arc://extensions → Remove Store Claude → Load unpacked →")
+            detail(f"   {BUILD_EXTENSION_DIR}")
+            detail("2. Re-run: claude-in-arc install --new-id  (coexists; different tradeoffs)")
+            detail("3. Override (not recommended): claude-in-arc install --ignore-conflict")
+            return EXIT_ERROR
+        if arc_state.is_patched_path and arc_state.store_copy_on_disk:
+            heading("Action required")
+            warn(
+                "The patched build is loaded, but a Store copy still exists on disk.\n"
+                "    Remove it from arc://extensions so Arc cannot revert to the\n"
+                "    unpatched copy on reload or update."
+            )
+            _print_conflict_fix(arc_state, include_detail=False)
+            say("")
 
     heading("Building")
     ok("Repacked the extension for Arc.")
@@ -968,11 +1155,117 @@ def cmd_link(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _doctor_arc_extension(verbose: bool = False) -> int:
+    """Return number of problems found in Arc extension registration."""
+    problems = 0
+    arc_state = inspect_arc_extension()
+
+    heading("Loaded in Arc?")
+    if not arc_state.registered and not arc_state.store_copy_on_disk:
+        warn("Claude extension not registered in Arc yet. Load it via arc://extensions →\n"
+             "    Developer mode → Load unpacked.")
+        problems += 1
+        if verbose:
+            detail(f"Expected path: {BUILD_EXTENSION_DIR}")
+            detail("Actual: not registered")
+        return problems
+
+    if arc_state.is_patched_path and arc_state.has_patch_marker:
+        ok("The patched build is registered in Arc.")
+        detail(arc_state.path or "")
+        if verbose:
+            detail(f"Expected: {BUILD_EXTENSION_DIR}")
+            detail(f"Service worker: {arc_state.service_worker or '(unknown)'}")
+            if arc_state.service_worker != SW_LOADER_FILENAME:
+                warn(
+                    f"Service worker is {arc_state.service_worker!r}, expected "
+                    f"{SW_LOADER_FILENAME!r}. Re-run install and Reload in Arc."
+                )
+                problems += 1
+    elif arc_state.is_patched_path:
+        warn("Arc points at the patched folder but CLAUDE_IN_ARC_PATCH.json is missing.\n"
+             "    Re-run 'claude-in-arc install'.")
+        problems += 1
+    else:
+        warn("Arc is running the Store / stock copy, not the patched build.")
+        if arc_state.path:
+            detail(arc_state.path)
+        if verbose:
+            detail(f"Expected patched path: {BUILD_EXTENSION_DIR}")
+        problems += 1
+
+    if arc_state.disabled:
+        fail("The Claude extension is disabled in Arc. Enable it on arc://extensions.")
+        problems += 1
+
+    if verbose and arc_state.registered:
+        info(f"Install source: {arc_state.location_label}")
+        info(f"from_webstore flag: {arc_state.from_webstore}")
+
+    return problems
+
+
+def _doctor_conflicts() -> int:
+    problems = 0
+    heading("Conflicts")
+    arc_state = inspect_arc_extension()
+    if arc_state.conflict:
+        warn(arc_state.conflict_detail)
+        _print_conflict_fix(arc_state, include_detail=False)
+        problems += 1
+    else:
+        ok("No Store vs patched conflict detected.")
+    return problems
+
+
+def _print_verify_walkthrough() -> None:
+    """Verbose step-by-step checklist (doctor --verbose / verify)."""
+    heading("Verification walkthrough")
+    arc_state = inspect_arc_extension()
+    build_ok = BUILD_EXTENSION_DIR.is_dir() and (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).is_file()
+
+    checks = [
+        ("Patched build on disk", build_ok, str(BUILD_EXTENSION_DIR)),
+        (
+            "Arc prefs point at patched build",
+            arc_state.is_patched_path and arc_state.has_patch_marker,
+            arc_state.path or "(not registered)",
+        ),
+        (
+            "Service worker is arc-sw-loader.js",
+            arc_state.service_worker == SW_LOADER_FILENAME,
+            arc_state.service_worker or "(unknown)",
+        ),
+        ("Shim asset in build", (BUILD_EXTENSION_DIR / SHIM_FILENAME).is_file() if build_ok else False,
+         SHIM_FILENAME),
+        ("No Store copy on disk", not arc_state.store_copy_on_disk,
+         ", ".join(arc_state.store_versions) if arc_state.store_versions else "none"),
+        ("Extension enabled in Arc", arc_state.registered and not arc_state.disabled,
+         "disabled" if arc_state.disabled else arc_state.location_label),
+    ]
+
+    for label, passed, actual in checks:
+        if passed:
+            ok(label)
+        else:
+            warn(f"{label} — expected OK, got: {actual}")
+        if _VERBOSITY >= 2:
+            detail(f"actual: {actual}")
+
+    say("")
+    info("If the icon still does nothing after Reload:")
+    detail("arc://extensions → Claude → Service worker → Inspect → Console")
+    detail("Look for errors loading claude-arc-shim.js or arc-sw-loader.js")
+    detail("Try Cmd+E (toggle-side-panel command) as well as the toolbar icon")
+    detail(f"Logs: {LOG_FILE}")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     banner()
     heading("Diagnostics")
 
     problems = 0
+    verbose = getattr(args, "verbose", False) or _VERBOSITY >= 2
 
     if arc_installed():
         ok("Arc is installed.")
@@ -997,7 +1290,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
              + OFFICIAL_EXTENSION_ID)
         problems += 1
     for s in sources:
-        # Verify each discovered copy is authentic (purely informational here).
         try:
             verify_official_source(s)
             ok(f"{s.label}  {Style.dim('[verified]')}")
@@ -1010,22 +1302,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok(f"Present at {BUILD_EXTENSION_DIR}")
         info(f"Built from {marker.get('source_browser')} v{marker.get('source_version')} "
              f"(tool {marker.get('tool_version')})")
+        if verbose:
+            manifest = _read_manifest(BUILD_EXTENSION_DIR)
+            info(f"manifest service_worker: {manifest.get('background', {}).get('service_worker')}")
     else:
         warn("No patched build yet. Run 'claude-in-arc install'.")
+        problems += 1
 
-    heading("Loaded in Arc?")
-    if arc_has_patched_build_loaded():
-        ok("The patched build appears to be loaded in Arc.")
-    else:
-        warn("Patched build not detected in Arc yet. Load it via arc://extensions →\n"
-             "    Developer mode → Load unpacked. (If you just loaded it, this can lag.)")
-
-    heading("Conflicts")
-    if arc_has_store_extension():
-        warn("Arc has the Store copy of Claude installed. With the default build\n"
-             "    (same id) you must remove it; or rebuild with --new-id to keep both.")
-    else:
-        ok("No conflicting Store copy of Claude in Arc.")
+    problems += _doctor_arc_extension(verbose=verbose)
+    problems += _doctor_conflicts()
 
     heading("Claude Desktop integration")
     src = find_native_host_manifest()
@@ -1050,12 +1335,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     heading("Logs")
     info(f"{LOG_FILE}")
 
+    if verbose:
+        _print_verify_walkthrough()
+
     say("")
     if problems:
         warn(f"{problems} item(s) need attention above.")
         return EXIT_ERROR
     ok("Everything looks healthy.")
     return EXIT_OK
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Verbose verification walkthrough (alias for doctor --verbose)."""
+    args.verbose = True
+    return cmd_doctor(args)
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -1162,6 +1456,11 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Don't auto-open Arc / reveal the folder.")
     p_install.add_argument("--no-link", dest="link", action="store_false",
                            help="Skip native-messaging mirroring.")
+    p_install.add_argument(
+        "--ignore-conflict",
+        action="store_true",
+        help="Build even when Arc still has the Store copy active (not recommended).",
+    )
     add_new_id(p_install)
     add_verify(p_install)
     add_common(p_install)
@@ -1179,7 +1478,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_link.set_defaults(func=cmd_link)
 
     p_doctor = sub.add_parser("doctor", help="Diagnose the current setup.")
-    p_doctor.set_defaults(func=cmd_doctor)
+    p_doctor.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print a step-by-step verification walkthrough (expected vs actual).",
+    )
+    p_doctor.set_defaults(func=cmd_doctor, verbose=False)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="Verbose verification walkthrough (same as doctor --verbose).",
+    )
+    p_verify.set_defaults(func=cmd_verify, verbose=True)
 
     p_uninstall = sub.add_parser("uninstall", help="Remove the patched build and roll back changes.")
     add_common(p_uninstall)

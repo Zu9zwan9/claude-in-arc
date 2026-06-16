@@ -45,7 +45,39 @@
 
   // If the browser already supports the real Side Panel API, do nothing.
   // This keeps the patched build identical to upstream on Chrome/Brave/Edge.
-  if (chrome.sidePanel) {
+  //
+  // Arc (and some Chromium forks) expose a truthy chrome.sidePanel object whose
+  // methods are missing or no-op JS stubs — NOT the native Chrome binding. A
+  // simple `if (chrome.sidePanel) return` lets those broken stubs through, the
+  // upstream worker calls sidePanel.open(), and the toolbar click silently does
+  // nothing. Real Chrome implementations are [native code] bindings.
+  function isOurShim(sp) {
+    return sp && sp.__claudeInArcShim === true;
+  }
+
+  function fnSource(fn) {
+    try {
+      return Function.prototype.toString.call(fn);
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function nativeSidePanelWorks(sp) {
+    if (!sp || isOurShim(sp)) return false;
+    if (typeof sp.open !== "function" || typeof sp.setOptions !== "function") {
+      return false;
+    }
+    var openSrc = fnSource(sp.open);
+    var setSrc = fnSource(sp.setOptions);
+    var openPlain = openSrc.indexOf("[native code]") === -1;
+    var setPlain = setSrc.indexOf("[native code]") === -1;
+    // Arc ships plain-JS stub methods; real Chrome exposes [native code] bindings.
+    if (openPlain && setPlain) return false;
+    return true;
+  }
+
+  if (nativeSidePanelWorks(chrome.sidePanel)) {
     return;
   }
 
@@ -240,6 +272,55 @@
     return Promise.resolve(value);
   }
 
+  // Arc often swallows chrome.action.onClicked for extensions with the sidePanel
+  // permission. Point the toolbar action at sidepanel.html (with ?tabId=) so a
+  // click opens the panel even when onClicked never fires.
+  function wireActionPopupFallback() {
+    if (!(chrome.action && chrome.action.setPopup && chrome.tabs)) return;
+
+    function setPopupForTab(tabId) {
+      if (tabId == null) return;
+      var path = resolvePath(tabId);
+      try {
+        chrome.action.setPopup({ tabId: tabId, popup: path });
+      } catch (_e) { /* no-op */ }
+    }
+
+    function syncActiveTabPopup() {
+      try {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+          void chrome.runtime.lastError;
+          var t = tabs && tabs[0];
+          if (t && t.id != null) setPopupForTab(t.id);
+        });
+      } catch (_e) { /* no-op */ }
+    }
+
+    syncActiveTabPopup();
+
+    try {
+      if (chrome.tabs.onActivated) {
+        chrome.tabs.onActivated.addListener(function (info) {
+          setPopupForTab(info.tabId);
+        });
+      }
+      if (chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
+          if (changeInfo.status === "complete") syncActiveTabPopup();
+        });
+      }
+    } catch (_e) { /* no-op */ }
+  }
+
+  var panelBehavior = { openPanelOnActionClick: false };
+  var actionClickWired = false;
+
+  function onActionClickOpenPanel(tab) {
+    var tabId = tab && tab.id;
+    if (tabId == null) return;
+    openOrFocusPanel(tabId).catch(function (_e) { /* no-op */ });
+  }
+
   var sidePanelPolyfill = {
     // Marker so other code / diagnostics can detect the shim.
     __claudeInArcShim: true,
@@ -262,14 +343,28 @@
       return settle(callback, value);
     },
 
-    setPanelBehavior: function (_behavior, callback) {
-      // The extension registers its own action.onClicked handler, so we don't
-      // need to wire openPanelOnActionClick. Accept and ignore.
+    setPanelBehavior: function (behavior, callback) {
+      try {
+        if (behavior && typeof behavior.openPanelOnActionClick === "boolean") {
+          panelBehavior.openPanelOnActionClick = behavior.openPanelOnActionClick;
+          if (
+            behavior.openPanelOnActionClick &&
+            !actionClickWired &&
+            chrome.action &&
+            chrome.action.onClicked
+          ) {
+            actionClickWired = true;
+            chrome.action.onClicked.addListener(onActionClickOpenPanel);
+          }
+        }
+      } catch (_e) { /* no-op */ }
       return settle(callback, undefined);
     },
 
     getPanelBehavior: function (callback) {
-      return settle(callback, { openPanelOnActionClick: false });
+      return settle(callback, {
+        openPanelOnActionClick: panelBehavior.openPanelOnActionClick,
+      });
     },
 
     open: function (options, callback) {
@@ -296,4 +391,6 @@
   } catch (_e) {
     try { chrome.sidePanel = sidePanelPolyfill; } catch (_e2) { /* no-op */ }
   }
+
+  wireActionPopupFallback();
 })();

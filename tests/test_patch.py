@@ -253,6 +253,98 @@ class IdentityAndLayoutTests(unittest.TestCase):
         self.assertTrue(core.PRODUCT_TAGLINE)
 
 
+class ArcInspectionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.arc_dir = self.tmp / "Arc" / "User Data"
+        self.default = self.arc_dir / "Default"
+        self.default.mkdir(parents=True)
+        self._orig_arc = core.arc_browser
+        self._orig_build = core.BUILD_EXTENSION_DIR
+        self._orig_root = core.BUILD_ROOT
+        self._orig_verbosity = core._VERBOSITY
+        core.BUILD_ROOT = self.tmp / "ClaudeInArc"
+        core.BUILD_EXTENSION_DIR = core.BUILD_ROOT / "Claude-in-Arc-Extension"
+        core._VERBOSITY = 0
+        core.arc_browser = lambda: core.Browser("arc", "Arc", self.arc_dir)
+
+    def tearDown(self):
+        core.arc_browser = self._orig_arc
+        core.BUILD_EXTENSION_DIR = self._orig_build
+        core.BUILD_ROOT = self._orig_root
+        core._VERBOSITY = self._orig_verbosity
+        self._tmp.cleanup()
+
+    def _write_prefs(self, ext_settings: dict) -> None:
+        prefs = {"extensions": {"settings": {core.OFFICIAL_EXTENSION_ID: ext_settings}}}
+        (self.default / "Secure Preferences").write_text(
+            json.dumps(prefs), encoding="utf-8"
+        )
+
+    def test_inspect_detects_patched_unpacked_path(self):
+        build = core.BUILD_EXTENSION_DIR
+        build.mkdir(parents=True)
+        (build / core.PATCH_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        (build / "manifest.json").write_text(
+            json.dumps({"background": {"service_worker": core.SW_LOADER_FILENAME}}),
+            encoding="utf-8",
+        )
+        self._write_prefs(
+            {
+                "path": str(build.resolve()),
+                "location": core.LOCATION_UNPACKED,
+                "from_webstore": False,
+                "disable_reasons": [],
+            }
+        )
+        state = core.inspect_arc_extension()
+        self.assertTrue(state.is_patched_path)
+        self.assertTrue(state.has_patch_marker)
+        self.assertEqual(state.service_worker, core.SW_LOADER_FILENAME)
+        self.assertTrue(core.arc_has_patched_build_loaded())
+
+    def test_inspect_flags_store_on_disk_with_patched_loaded(self):
+        build = core.BUILD_EXTENSION_DIR
+        build.mkdir(parents=True)
+        (build / core.PATCH_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        (build / "manifest.json").write_text(
+            json.dumps({"background": {"service_worker": core.SW_LOADER_FILENAME}}),
+            encoding="utf-8",
+        )
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        self._write_prefs(
+            {
+                "path": str(build.resolve()),
+                "location": core.LOCATION_UNPACKED,
+                "from_webstore": False,
+                "disable_reasons": [],
+            }
+        )
+        state = core.inspect_arc_extension()
+        self.assertTrue(state.conflict)
+        self.assertIn("Store copy still exists", state.conflict_detail)
+
+    def test_inspect_store_active_not_patched(self):
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        self._write_prefs(
+            {
+                "path": str(store.resolve()),
+                "location": core.LOCATION_EXTERNAL_PREF,
+                "from_webstore": True,
+                "disable_reasons": [],
+            }
+        )
+        state = core.inspect_arc_extension()
+        self.assertFalse(state.is_patched_path)
+        self.assertTrue(state.conflict)
+        self.assertFalse(core.arc_has_patched_build_loaded())
+
+
 class RollbackTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

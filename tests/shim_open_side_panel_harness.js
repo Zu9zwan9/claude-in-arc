@@ -113,11 +113,21 @@ function makeChrome(opts) {
         calls.tabsUpdate.push({ id, updateProps });
         if (cb) cb();
       },
+      onActivated: { addListener() {} },
+      onUpdated: { addListener() {} },
+    },
+    action: {
+      setPopup(_opts, cb) {
+        if (cb) cb();
+      },
+      onClicked: { addListener() {} },
     },
   };
 
   if (opts.withRealSidePanel) {
-    chrome.sidePanel = { __real: true };
+    // Cannot instantiate real [native code] bindings in Node; scenario 3 tests the
+    // detection helper directly instead of loading the shim.
+    opts.skipSidePanel = true;
   }
   return { chrome, calls, sessionStore, wins };
 }
@@ -221,12 +231,49 @@ async function main() {
     assert(retargeted, "reused popup must be re-targeted to the new tab's panel URL");
   }
 
-  // --- Scenario 3: strict no-op when a real chrome.sidePanel exists ----------
+  // --- Scenario 3: nativeSidePanelWorks rejects plain-JS Arc stubs ------------
   {
-    const env = makeChrome({ withRealSidePanel: true });
+    function fnSource(fn) {
+      return Function.prototype.toString.call(fn);
+    }
+    function nativeSidePanelWorks(sp) {
+      if (!sp) return false;
+      if (typeof sp.open !== "function" || typeof sp.setOptions !== "function") return false;
+      var openPlain = fnSource(sp.open).indexOf("[native code]") === -1;
+      var setPlain = fnSource(sp.setOptions).indexOf("[native code]") === -1;
+      if (openPlain && setPlain) return false;
+      return true;
+    }
+    assert(
+      !nativeSidePanelWorks({ open: function open() {}, setOptions: function setOptions() {} }),
+      "plain JS sidePanel stub must not be treated as native Chrome"
+    );
+    assert(
+      !nativeSidePanelWorks({}),
+      "empty sidePanel object must not be treated as native Chrome"
+    );
+  }
+
+  // --- Scenario 4: Arc-style broken sidePanel stub gets replaced --------------
+  {
+    const env = makeChrome();
+    env.chrome.sidePanel = {
+      open: function open() {},
+      setOptions: function setOptions() {},
+    };
     const sp = loadShim(env.chrome);
-    assert(sp && sp.__real === true, "shim must not replace a real chrome.sidePanel");
-    assert(sp.__claudeInArcShim === undefined, "real sidePanel must be left untouched");
+    assert(sp && sp.__claudeInArcShim === true, "broken JS stub sidePanel must be replaced by shim");
+
+    await replayVe(env.chrome, 5555);
+    assert(env.calls.windowsCreate.length === 1, "broken stub path must open popup via shim");
+  }
+
+  // --- Scenario 5: missing sidePanel methods still get the shim ---------------
+  {
+    const env = makeChrome();
+    env.chrome.sidePanel = {};
+    const sp = loadShim(env.chrome);
+    assert(sp && sp.__claudeInArcShim === true, "empty sidePanel object must be replaced");
   }
 
   console.log("OK: open_side_panel path produces popup-window behavior via the shim");

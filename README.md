@@ -9,7 +9,7 @@ Run the official "Claude in Chrome" extension in Arc — real side‑panel chat,
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-black.svg?logo=apple)](#requirements)
 [![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#requirements)
-[![Tests: passing](https://img.shields.io/badge/tests-22%20passing-brightgreen.svg)](tests)
+[![Tests: passing](https://img.shields.io/badge/tests-25%20passing-brightgreen.svg)](tests)
 [![Security: documented](https://img.shields.io/badge/security-threat%20model-blue.svg)](docs/SECURITY.md)
 [![GitHub stars](https://img.shields.io/github/stars/Zu9zwan9/claude-in-arc?style=social)](https://github.com/Zu9zwan9/claude-in-arc/stargazers)
 
@@ -126,11 +126,24 @@ window with full page context. 🎉
 > Arc loads only one copy. Either remove the Store copy, **or** re‑run with
 > `--new-id` to keep both. `claude-in-arc doctor` detects this for you.
 
+### Troubleshooting: icon click does nothing
+
+See **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)** for the full checklist. Quick version:
+
+1. `claude-in-arc verify` — conflicts and load state must be green.
+2. Remove the **Store** Claude copy on `arc://extensions` (keep Load unpacked).
+3. Re-run `claude-in-arc install`, then **Reload** the unpacked extension.
+4. Inspect the service worker console for import errors.
+
+Arc exposes a broken `chrome.sidePanel` stub; the patch replaces it and wires the
+toolbar icon to open `sidepanel.html` as a popup when Arc swallows click events.
+
 ## Commands & flags
 
 ```bash
 claude-in-arc install      # build + verify + link + open Arc + print the last click (default)
 claude-in-arc doctor       # diagnose: Arc, extension, two-Claude conflict, load state, native messaging
+claude-in-arc verify       # verbose walkthrough: expected vs actual for every check (see docs/WALKTHROUGH.md)
 claude-in-arc build        # only (re)build the patched extension
 claude-in-arc link         # mirror the Claude native-messaging host into Arc
 claude-in-arc reveal       # open the build folder in Finder
@@ -177,7 +190,7 @@ When the official extension updates in your browser, re‑run `claude-in-arc ins
 python3 -m unittest discover -s tests -v
 ```
 
-The patch engine and safety logic are covered by a synthetic‑extension test suite (22 tests): service‑worker repointing, shim ordering, page injection, idempotency, id preservation, `--new-id`, **cryptographic authenticity verification**, **path‑safety guards**, **backup creation**, **uninstall rollback**, and **CLI layout/identity**.
+The patch engine and safety logic are covered by a synthetic‑extension test suite (25 tests): service‑worker repointing, shim ordering, page injection, idempotency, id preservation, `--new-id`, **cryptographic authenticity verification**, **path‑safety guards**, **backup creation**, **uninstall rollback**, **Arc extension inspection**, **broken sidePanel stub handling**, and **CLI layout/identity**.
 
 ## Contributing
 
