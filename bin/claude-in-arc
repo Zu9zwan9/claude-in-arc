@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Thin launcher for the claude-in-arc CLI. Resolves the repo root regardless of
+# where the symlink lives, then runs the Python package with the system python3.
+set -euo pipefail
+
+# Resolve symlinks to find the real script location.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd -P "$BIN_DIR/.." >/dev/null 2>&1 && pwd)"
+
+PYTHON="${CLAUDE_IN_ARC_PYTHON:-python3}"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+  echo "claude-in-arc: python3 not found. Install the Xcode Command Line Tools:" >&2
+  echo "  xcode-select --install" >&2
+  exit 127
+fi
+
+exec env PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m claude_in_arc "$@"

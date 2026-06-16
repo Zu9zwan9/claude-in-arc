@@ -1,0 +1,1233 @@
+"""
+claude_in_arc.core
+==================
+
+Production-grade toolkit that makes the official "Claude in Chrome" extension
+work in Arc (and other Chromium browsers that lack the chrome.sidePanel API).
+
+It does this WITHOUT bundling a stale copy of the extension: it locates the
+freshest copy of the official extension already installed on this machine,
+cryptographically verifies it is the genuine Anthropic extension, re-packs it
+into an Arc-compatible unpacked build by injecting a chrome.sidePanel polyfill,
+and (optionally) mirrors the Claude native-messaging host manifest into Arc.
+
+Design principles
+-----------------
+- Least privilege: never requires sudo; writes only inside the user's home /
+  Library. Refuses to operate on paths outside expected directories.
+- Integrity: verifies the source extension's public key hashes to the official
+  id before patching. Fails loudly otherwise.
+- Reversible: backs up any file it overwrites and records a state file so
+  `uninstall` fully rolls back.
+- No secrets, no telemetry, no network calls. Standard library only.
+
+macOS only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# The official "Claude in Chrome" extension id (Chrome Web Store).
+OFFICIAL_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn"
+
+# The official extension's public key (from its manifest). The Chromium
+# extension id is derived from this key, so any genuine copy must carry a key
+# that hashes to OFFICIAL_EXTENSION_ID. Kept here for defense-in-depth.
+OFFICIAL_EXTENSION_KEY = (
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjU1XnLPoasGVmZU42K3h6S+sQhkog"
+    "fcoLPbIcrWH5Oo8QoInBIugkew/7cWaEFySyQrkaEBe1fjeS/rlAqd3r778dKcTvDZcXmj0VV"
+    "X0Fi1i8tnkarurceGKGdVxfkL7e30nwfgwoPxj3H8OQbsbxFcBWGVtcFekmdpiyaxwz6o4yXI"
+    "WColfAxh9K2yToOZkoAS5GvgGvTexiCh1gYy++eFdk6C61mcFsyDdoGQtduhGEaX0zZ9uAW1j"
+    "X4JTPmHV3kEFrZu/WVBl7Obw+Jk/osoHMdmghVNy6SCB8/6mcgmxkP9buPrNUZgYP6n0x5dqE"
+    "J2Ecww/lb1Zd4nQf4XGOwIDAQAB"
+)
+
+# Native messaging host that Claude Desktop / Claude Code register.
+NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
+NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
+
+TOOL_VERSION = "1.2.0"
+
+# Product identity (cohesive voice across CLI + docs).
+PRODUCT_NAME = "Claude in Arc"
+PRODUCT_TAGLINE = "Claude's side panel, now at home in Arc."
+# Shown prominently so the project is never mistaken for an official release.
+DISCLAIMER = (
+    "Unofficial · community-built · not affiliated with or endorsed by "
+    "Anthropic or The Browser Company."
+)
+
+APP_SUPPORT = Path.home() / "Library" / "Application Support"
+
+# Stable location for the patched, unpacked extension. Keeping this path stable
+# means Arc remembers the loaded extension across rebuilds.
+BUILD_ROOT = APP_SUPPORT / "ClaudeInArc"
+BUILD_EXTENSION_DIR = BUILD_ROOT / "Claude-in-Arc-Extension"
+STATE_FILENAME = "state.json"
+PATCH_MARKER_FILENAME = "CLAUDE_IN_ARC_PATCH.json"
+BACKUP_SUFFIX = ".claude-in-arc.bak"
+
+SHIM_FILENAME = "claude-arc-shim.js"
+SW_LOADER_FILENAME = "arc-sw-loader.js"
+
+# Extension HTML pages that may themselves call chrome.sidePanel and therefore
+# need the page-side shim injected.
+PAGES_TO_PATCH = ["options.html", "sidepanel.html"]
+
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+SHIM_SOURCE = ASSETS_DIR / SHIM_FILENAME
+
+LOG_DIR = Path.home() / "Library" / "Logs" / "claude-in-arc"
+LOG_FILE = LOG_DIR / "claude-in-arc.log"
+
+# Exit codes.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+
+
+# ---------------------------------------------------------------------------
+# Logging & verbosity
+# ---------------------------------------------------------------------------
+
+LOG = logging.getLogger("claude-in-arc")
+_VERBOSITY = 1  # 0 = quiet (errors only), 1 = normal, 2 = verbose
+
+
+def setup_logging(verbosity: int) -> None:
+    """Configure module verbosity and structured file logging (best effort)."""
+    global _VERBOSITY
+    _VERBOSITY = verbosity
+    LOG.setLevel(logging.DEBUG)
+    LOG.handlers.clear()
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        handler.setLevel(logging.DEBUG)
+        LOG.addHandler(handler)
+        LOG.debug("=== run: %s v%s argv=%s ===", time.strftime("%Y-%m-%d %H:%M:%S"),
+                  TOOL_VERSION, " ".join(sys.argv[1:]))
+    except OSError:
+        # Logging is a convenience; never fail the tool because of it.
+        LOG.addHandler(logging.NullHandler())
+
+
+# ---------------------------------------------------------------------------
+# Browser registry (macOS data directories)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Browser:
+    key: str
+    name: str
+    data_dir: Path
+    # Whether this browser is known to lack a working chrome.sidePanel API.
+    needs_patch: bool = False
+
+
+def known_browsers() -> List[Browser]:
+    base = APP_SUPPORT
+    return [
+        Browser("arc", "Arc", base / "Arc" / "User Data", needs_patch=True),
+        Browser("chrome", "Google Chrome", base / "Google" / "Chrome"),
+        Browser("chrome_beta", "Google Chrome Beta", base / "Google" / "Chrome Beta"),
+        Browser("chrome_canary", "Google Chrome Canary", base / "Google" / "Chrome Canary"),
+        Browser("brave", "Brave", base / "BraveSoftware" / "Brave-Browser"),
+        Browser("edge", "Microsoft Edge", base / "Microsoft Edge"),
+        Browser("vivaldi", "Vivaldi", base / "Vivaldi", needs_patch=True),
+        Browser("chromium", "Chromium", base / "Chromium"),
+        Browser("opera", "Opera", base / "com.operasoftware.Opera"),
+        Browser("comet", "Comet", base / "Comet"),
+        Browser("dia", "Dia", base / "Dia" / "User Data"),
+    ]
+
+
+def installed_browsers() -> List[Browser]:
+    return [b for b in known_browsers() if b.data_dir.is_dir()]
+
+
+def arc_browser() -> Optional[Browser]:
+    return next((b for b in known_browsers() if b.key == "arc"), None)
+
+
+def arc_installed() -> bool:
+    b = arc_browser()
+    return bool(b and b.data_dir.is_dir()) or Path("/Applications/Arc.app").exists()
+
+
+# ---------------------------------------------------------------------------
+# Output helpers (verbosity-aware + logged)
+# ---------------------------------------------------------------------------
+
+class Style:
+    _enabled = sys.stdout.isatty()
+
+    @classmethod
+    def _wrap(cls, code: str, text: str) -> str:
+        if not cls._enabled:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    @classmethod
+    def bold(cls, t: str) -> str:
+        return cls._wrap("1", t)
+
+    @classmethod
+    def green(cls, t: str) -> str:
+        return cls._wrap("32", t)
+
+    @classmethod
+    def yellow(cls, t: str) -> str:
+        return cls._wrap("33", t)
+
+    @classmethod
+    def red(cls, t: str) -> str:
+        return cls._wrap("31", t)
+
+    @classmethod
+    def cyan(cls, t: str) -> str:
+        return cls._wrap("36", t)
+
+    @classmethod
+    def dim(cls, t: str) -> str:
+        return cls._wrap("2", t)
+
+
+def ok(msg: str) -> None:
+    LOG.info(msg)
+    if _VERBOSITY >= 1:
+        print(f"  {Style.green('✓')} {msg}")
+
+
+def warn(msg: str) -> None:
+    LOG.warning(msg)
+    if _VERBOSITY >= 1:
+        print(f"  {Style.yellow('!')} {msg}")
+
+
+def fail(msg: str) -> None:
+    LOG.error(msg)
+    # Errors always surface, even in quiet mode, and go to stderr.
+    print(f"  {Style.red('✗')} {msg}", file=sys.stderr)
+
+
+def info(msg: str) -> None:
+    LOG.info(msg)
+    if _VERBOSITY >= 1:
+        print(f"  {Style.cyan('·')} {msg}")
+
+
+def debug(msg: str) -> None:
+    LOG.debug(msg)
+    if _VERBOSITY >= 2:
+        print(f"  {Style.dim('debug:')} {Style.dim(msg)}")
+
+
+def heading(msg: str) -> None:
+    LOG.info("== %s", msg)
+    if _VERBOSITY >= 1:
+        print()
+        print(Style.bold(msg))
+
+
+def say(msg: str) -> None:
+    """Plain user-facing line (numbered steps etc.), suppressed when quiet."""
+    if _VERBOSITY >= 1:
+        print(msg)
+
+
+def step(n: int, msg: str) -> None:
+    """A numbered onboarding step with consistent alignment."""
+    if _VERBOSITY >= 1:
+        print(f"  {Style.bold(str(n) + '.')} {msg}")
+
+
+def detail(msg: str) -> None:
+    """Quiet secondary line under a step or status (calm, dimmed)."""
+    if _VERBOSITY >= 1:
+        print(f"     {Style.dim(msg)}")
+
+
+def rule(width: int = 54) -> None:
+    if _VERBOSITY >= 1:
+        print("  " + Style.dim("─" * width))
+
+
+_BANNER_SHOWN = False
+_BANNER_WIDTH = 52
+
+
+def _banner_inner(width: int = _BANNER_WIDTH) -> List[str]:
+    """Pure layout helper: the two header rows, padded to exactly `width`.
+
+    Kept separate (and side-effect free) so alignment is unit-testable and can't
+    silently break if the product name/tagline/version change.
+    """
+    ver = f"v{TOOL_VERSION}"
+    l1 = " " + PRODUCT_NAME
+    l1 = l1 + " " * (width - len(l1) - len(ver) - 1) + ver + " "
+    l2 = " " + PRODUCT_TAGLINE
+    l2 = l2 + " " * (width - len(l2))
+    return [l1, l2]
+
+
+def banner(force: bool = False) -> None:
+    """A restrained, designed product header. Shown once per invocation (TTY)."""
+    global _BANNER_SHOWN
+    if _VERBOSITY < 1 or (_BANNER_SHOWN and not force):
+        return
+    _BANNER_SHOWN = True
+
+    w = _BANNER_WIDTH
+    l1, l2 = _banner_inner(w)
+    l1_disp = l1.replace(PRODUCT_NAME, Style.bold(PRODUCT_NAME), 1)
+
+    d = Style.dim
+    print()
+    print("  " + d("╭" + "─" * w + "╮"))
+    print("  " + d("│") + l1_disp + d("│"))
+    print("  " + d("│") + d(l2) + d("│"))
+    print("  " + d("╰" + "─" * w + "╯"))
+    print("  " + d(DISCLAIMER))
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class CliError(Exception):
+    pass
+
+
+class SecurityError(CliError):
+    """Raised when an integrity/authenticity or path-safety check fails."""
+
+
+# ---------------------------------------------------------------------------
+# Path safety
+# ---------------------------------------------------------------------------
+
+def _assert_within(path: Path, root: Path) -> Path:
+    """Refuse to operate on a path outside the expected root directory."""
+    rp = path.resolve()
+    rroot = root.resolve()
+    if rp != rroot and rroot not in rp.parents:
+        raise SecurityError(
+            f"Refusing to operate on a path outside the expected directory:\n"
+            f"    path: {rp}\n    must be within: {rroot}"
+        )
+    return rp
+
+
+# ---------------------------------------------------------------------------
+# Integrity verification
+# ---------------------------------------------------------------------------
+
+def _extension_id_from_key(key_b64: str) -> str:
+    """Compute the Chromium extension id from a manifest 'key' (base64 DER)."""
+    der = base64.b64decode(key_b64)
+    digest = hashlib.sha256(der).hexdigest()[:32]
+    return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+
+
+def verify_official_source(source: "SourceExtension", allow_unverified: bool = False) -> str:
+    """
+    Verify the source is the genuine official extension by checking that its
+    manifest 'key' hashes to the official extension id. Returns the computed id.
+    Raises SecurityError on mismatch (unless allow_unverified is set).
+    """
+    manifest = _read_manifest(source.path)
+    name = manifest.get("name", "")
+    key = manifest.get("key")
+
+    if not key:
+        msg = ("Source extension manifest has no 'key', so its authenticity "
+               "cannot be cryptographically verified.")
+        if allow_unverified:
+            warn(msg + " Proceeding because --allow-unverified was given.")
+            return ""
+        raise SecurityError(
+            msg + "\n    Refusing to patch an unverifiable extension. Pass "
+            "--allow-unverified to override (not recommended)."
+        )
+
+    try:
+        computed = _extension_id_from_key(key)
+    except (ValueError, Exception) as e:  # noqa: BLE001 - report any decode failure
+        raise SecurityError(f"Could not parse the extension 'key': {e}")
+
+    if computed != OFFICIAL_EXTENSION_ID:
+        msg = (f"Source extension is NOT the official Claude extension.\n"
+               f"    expected id: {OFFICIAL_EXTENSION_ID}\n"
+               f"    computed id: {computed}  (name: {name!r})")
+        if allow_unverified:
+            warn(msg + "\n    Proceeding because --allow-unverified was given.")
+            return computed
+        raise SecurityError(msg + "\n    Aborting for your safety.")
+
+    debug(f"verified authenticity: key hashes to {computed}")
+    return computed
+
+
+# ---------------------------------------------------------------------------
+# Source extension discovery
+# ---------------------------------------------------------------------------
+
+_VERSION_DIR_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:_\d+)?$")
+
+
+def _parse_version(dir_name: str) -> Optional[Tuple[int, ...]]:
+    m = _VERSION_DIR_RE.match(dir_name)
+    if not m:
+        return None
+    try:
+        return tuple(int(p) for p in m.group(1).split("."))
+    except ValueError:
+        return None
+
+
+@dataclass
+class SourceExtension:
+    browser: Browser
+    version: str
+    version_tuple: Tuple[int, ...]
+    path: Path  # directory containing manifest.json
+
+    @property
+    def label(self) -> str:
+        return f"{self.version} (from {self.browser.name})"
+
+
+def _iter_extension_copies(browser: Browser) -> List[SourceExtension]:
+    """Find every installed copy of the official extension in a browser."""
+    results: List[SourceExtension] = []
+    data_dir = browser.data_dir
+    if not data_dir.is_dir():
+        return results
+
+    candidate_ext_roots: List[Path] = []
+    for ext_root in data_dir.glob(f"*/Extensions/{OFFICIAL_EXTENSION_ID}"):
+        candidate_ext_roots.append(ext_root)
+    direct = data_dir / "Extensions" / OFFICIAL_EXTENSION_ID
+    if direct.is_dir():
+        candidate_ext_roots.append(direct)
+
+    for ext_root in candidate_ext_roots:
+        if not ext_root.is_dir():
+            continue
+        for version_dir in ext_root.iterdir():
+            if not version_dir.is_dir():
+                continue
+            vt = _parse_version(version_dir.name)
+            if vt is None:
+                continue
+            if not (version_dir / "manifest.json").is_file():
+                continue
+            results.append(
+                SourceExtension(
+                    browser=browser,
+                    version=version_dir.name,
+                    version_tuple=vt,
+                    path=version_dir,
+                )
+            )
+    return results
+
+
+def discover_sources() -> List[SourceExtension]:
+    sources: List[SourceExtension] = []
+    for browser in installed_browsers():
+        sources.extend(_iter_extension_copies(browser))
+    sources.sort(key=lambda s: s.version_tuple, reverse=True)
+    return sources
+
+
+def pick_source(explicit_path: Optional[str]) -> SourceExtension:
+    if explicit_path:
+        p = Path(explicit_path).expanduser().resolve()
+        manifest = p / "manifest.json"
+        if not manifest.is_file():
+            raise CliError(
+                f"No manifest.json found in --source path: {p}\n"
+                "Point --source at an unpacked extension directory."
+            )
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        version = str(data.get("version", "0"))
+        vt = _parse_version(version) or (0,)
+        synthetic = Browser("custom", "custom path", p.parent)
+        return SourceExtension(synthetic, version, vt, p)
+
+    sources = discover_sources()
+    if not sources:
+        raise CliError(
+            "Could not find the official 'Claude in Chrome' extension on this Mac.\n"
+            "Install it first from the Chrome Web Store in any Chromium browser\n"
+            "(Arc, Chrome, Brave, Edge, ...), then re-run. Store page:\n"
+            "  https://chromewebstore.google.com/detail/claude/"
+            + OFFICIAL_EXTENSION_ID
+        )
+    return sources[0]
+
+
+# ---------------------------------------------------------------------------
+# State (for clean rollback)
+# ---------------------------------------------------------------------------
+
+def _state_path() -> Path:
+    return BUILD_ROOT / STATE_FILENAME
+
+
+def read_state() -> Dict:
+    p = _state_path()
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return {}
+    return {}
+
+
+def write_state(state: Dict) -> None:
+    BUILD_ROOT.mkdir(parents=True, exist_ok=True)
+    _state_path().write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _backup_file(path: Path) -> Optional[Path]:
+    """Back up an existing file before overwrite. Returns the backup path."""
+    if not path.is_file():
+        return None
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(path, backup)
+        debug(f"backed up {path} -> {backup}")
+    return backup
+
+
+# ---------------------------------------------------------------------------
+# Patch engine
+# ---------------------------------------------------------------------------
+
+def _read_manifest(ext_dir: Path) -> Dict:
+    manifest_path = ext_dir / "manifest.json"
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _inject_page_shim(html_path: Path) -> bool:
+    """Insert the shim as the first <head> script so it runs before bundled JS."""
+    if not html_path.is_file():
+        return False
+    html = html_path.read_text(encoding="utf-8")
+    tag = f'<script src="{SHIM_FILENAME}"></script>'
+    if tag in html:
+        return True
+    m = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
+    if m:
+        idx = m.end()
+        new_html = html[:idx] + tag + html[idx:]
+    else:
+        m2 = re.search(r"<html[^>]*>", html, flags=re.IGNORECASE)
+        if m2:
+            idx = m2.end()
+            new_html = html[:idx] + "<head>" + tag + "</head>" + html[idx:]
+        else:
+            new_html = tag + html
+    html_path.write_text(new_html, encoding="utf-8")
+    return True
+
+
+@dataclass
+class BuildResult:
+    source: SourceExtension
+    build_dir: Path
+    extension_id_preserved: bool
+    patched_pages: List[str] = field(default_factory=list)
+    original_service_worker: str = ""
+
+
+def build_extension(
+    source: SourceExtension, dry_run: bool = False, new_id: bool = False
+) -> BuildResult:
+    if not SHIM_SOURCE.is_file():
+        raise CliError(f"Internal error: shim asset missing at {SHIM_SOURCE}")
+
+    manifest = _read_manifest(source.path)
+
+    background = manifest.get("background") or {}
+    original_sw = background.get("service_worker")
+    if not original_sw:
+        raise CliError(
+            "Source extension has no background.service_worker; cannot patch.\n"
+            "This usually means the extension format changed. Please open an issue."
+        )
+
+    key_present = bool(manifest.get("key")) and not new_id
+
+    if dry_run:
+        print()
+        info(f"[dry-run] would copy {source.path}")
+        info(f"[dry-run]   -> {BUILD_EXTENSION_DIR}")
+        info(f"[dry-run] would wrap service worker '{original_sw}' with '{SW_LOADER_FILENAME}'")
+        info(f"[dry-run] would inject page shim into: {', '.join(PAGES_TO_PATCH)}")
+        info(f"[dry-run] extension id preserved via manifest key: {key_present}")
+        if new_id:
+            info("[dry-run] --new-id: would drop manifest key and rename to 'Claude (Arc)'")
+        return BuildResult(
+            source=source,
+            build_dir=BUILD_EXTENSION_DIR,
+            extension_id_preserved=key_present,
+            patched_pages=[],
+            original_service_worker=original_sw,
+        )
+
+    # Path-safety: only ever build inside our managed directory.
+    _assert_within(BUILD_EXTENSION_DIR, BUILD_ROOT)
+
+    if BUILD_EXTENSION_DIR.exists():
+        shutil.rmtree(BUILD_EXTENSION_DIR)
+    BUILD_EXTENSION_DIR.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source.path, BUILD_EXTENSION_DIR)
+
+    # 1) Drop the chrome.sidePanel polyfill at the extension root.
+    shutil.copy2(SHIM_SOURCE, BUILD_EXTENSION_DIR / SHIM_FILENAME)
+
+    # 2) Create a module loader that runs the shim before the real worker.
+    loader = (
+        "// Auto-generated by claude-in-arc. Loads the chrome.sidePanel\n"
+        "// polyfill before the upstream Claude service worker.\n"
+        f'import "./{SHIM_FILENAME}";\n'
+        f'import "./{original_sw}";\n'
+    )
+    (BUILD_EXTENSION_DIR / SW_LOADER_FILENAME).write_text(loader, encoding="utf-8")
+
+    # 3) Repoint the manifest service worker to our loader (keep type:module).
+    manifest["background"]["service_worker"] = SW_LOADER_FILENAME
+    if "type" not in manifest["background"]:
+        manifest["background"]["type"] = "module"
+
+    if new_id:
+        manifest.pop("key", None)
+        base_name = manifest.get("name", "Claude")
+        if "(Arc)" not in base_name:
+            manifest["name"] = f"{base_name} (Arc)"
+
+    (BUILD_EXTENSION_DIR / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    # 4) Inject the page-side shim into HTML pages that touch chrome.sidePanel.
+    patched_pages: List[str] = []
+    for page in PAGES_TO_PATCH:
+        if _inject_page_shim(BUILD_EXTENSION_DIR / page):
+            patched_pages.append(page)
+
+    # 5) Drop a patch marker (kept out of manifest.json to avoid manifest warnings).
+    marker = {
+        "tool": "claude-in-arc",
+        "tool_version": TOOL_VERSION,
+        "source_browser": source.browser.name,
+        "source_version": source.version,
+        "extension_id_preserved": key_present,
+        "service_worker_loader": SW_LOADER_FILENAME,
+        "original_service_worker": original_sw,
+        "patched_pages": patched_pages,
+    }
+    (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).write_text(
+        json.dumps(marker, indent=2) + "\n", encoding="utf-8"
+    )
+
+    _validate_build(BUILD_EXTENSION_DIR)
+
+    # Record state for rollback.
+    state = read_state()
+    state["build_dir"] = str(BUILD_EXTENSION_DIR)
+    state["tool_version"] = TOOL_VERSION
+    state["new_id"] = new_id
+    write_state(state)
+
+    return BuildResult(
+        source=source,
+        build_dir=BUILD_EXTENSION_DIR,
+        extension_id_preserved=key_present,
+        patched_pages=patched_pages,
+        original_service_worker=original_sw,
+    )
+
+
+def _validate_build(build_dir: Path) -> None:
+    manifest_path = build_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise CliError("Build validation failed: manifest.json missing.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    sw = manifest.get("background", {}).get("service_worker")
+    if sw != SW_LOADER_FILENAME:
+        raise CliError("Build validation failed: service worker was not repointed.")
+    for required in (SW_LOADER_FILENAME, SHIM_FILENAME, manifest["background"].get("service_worker")):
+        if not (build_dir / required).is_file():
+            raise CliError(f"Build validation failed: missing {required}.")
+    loader_text = (build_dir / SW_LOADER_FILENAME).read_text(encoding="utf-8")
+    if SHIM_FILENAME not in loader_text:
+        raise CliError("Build validation failed: loader does not import the shim.")
+
+
+# ---------------------------------------------------------------------------
+# Native messaging mirroring
+# ---------------------------------------------------------------------------
+
+def _nmh_dir(browser: Browser) -> Path:
+    return browser.data_dir / "NativeMessagingHosts"
+
+
+def find_native_host_manifest() -> Optional[Path]:
+    """Locate an existing Claude native-messaging host manifest, if any."""
+    for browser in installed_browsers():
+        candidate = _nmh_dir(browser) / NATIVE_HOST_FILENAME
+        if candidate.is_file():
+            return candidate
+    for browser in installed_browsers():
+        d = _nmh_dir(browser)
+        if not d.is_dir():
+            continue
+        for j in d.glob("*.json"):
+            try:
+                data = json.loads(j.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if data.get("name") == NATIVE_HOST_NAME:
+                return j
+    return None
+
+
+@dataclass
+class LinkResult:
+    status: str  # "linked", "already", "missing-source", "dry-run"
+    source: Optional[Path] = None
+    target: Optional[Path] = None
+
+
+def link_native_messaging(dry_run: bool = False) -> LinkResult:
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return LinkResult(status="missing-source")
+
+    target = _nmh_dir(arc) / NATIVE_HOST_FILENAME
+    source = find_native_host_manifest()
+    if source is None:
+        return LinkResult(status="missing-source", target=target)
+
+    src_data = json.loads(source.read_text(encoding="utf-8"))
+    origins = src_data.get("allowed_origins") or []
+    official_origin = f"chrome-extension://{OFFICIAL_EXTENSION_ID}/"
+    if official_origin not in origins:
+        origins.append(official_origin)
+        src_data["allowed_origins"] = origins
+
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if (
+                existing.get("allowed_origins")
+                and official_origin in existing.get("allowed_origins", [])
+                and existing.get("path") == src_data.get("path")
+            ):
+                return LinkResult(status="already", source=source, target=target)
+        except (ValueError, OSError):
+            pass
+
+    if dry_run:
+        return LinkResult(status="dry-run", source=source, target=target)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Back up any pre-existing manifest we did not create, then record state.
+    state = read_state()
+    pre_existed = target.is_file()
+    backup = _backup_file(target) if pre_existed else None
+
+    target.write_text(json.dumps(src_data, indent=2) + "\n", encoding="utf-8")
+
+    state["native_manifest"] = str(target)
+    state["native_manifest_preexisted"] = pre_existed
+    if backup is not None:
+        state["native_manifest_backup"] = str(backup)
+    write_state(state)
+
+    return LinkResult(status="linked", source=source, target=target)
+
+
+# ---------------------------------------------------------------------------
+# Arc state inspection
+# ---------------------------------------------------------------------------
+
+def arc_has_store_extension() -> bool:
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return False
+    for ext_root in arc.data_dir.glob(f"*/Extensions/{OFFICIAL_EXTENSION_ID}"):
+        if ext_root.is_dir() and any(ext_root.iterdir()):
+            return True
+    return False
+
+
+def arc_has_patched_build_loaded() -> bool:
+    """Best-effort: detect if our unpacked build is referenced by Arc's prefs."""
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return False
+    needle = str(BUILD_EXTENSION_DIR)
+    for pref in arc.data_dir.glob("*/Secure Preferences"):
+        try:
+            if needle in pref.read_text(encoding="utf-8", errors="ignore"):
+                return True
+        except OSError:
+            continue
+    for pref in arc.data_dir.glob("*/Preferences"):
+        try:
+            if needle in pref.read_text(encoding="utf-8", errors="ignore"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Best-effort "open the right place for the user"
+# ---------------------------------------------------------------------------
+
+def _open_arc_extensions() -> bool:
+    """Best-effort open of Arc's extensions page. Never raises."""
+    if not arc_installed():
+        return False
+    for cmd in (
+        ["open", "-a", "Arc", "arc://extensions"],
+        ["open", "-a", "Arc", "chrome://extensions"],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=10)
+            if r.returncode == 0:
+                debug("opened Arc extensions page via: " + " ".join(cmd))
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def _reveal_in_finder(path: Path) -> bool:
+    try:
+        r = subprocess.run(["open", "-R", str(path)], capture_output=True, timeout=10)
+        if r.returncode != 0:
+            r = subprocess.run(["open", str(path)], capture_output=True, timeout=10)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> None:
+    heading("One step left")
+    say("  Chromium asks you to load an unpacked extension yourself — a deliberate")
+    say("  security boundary that no tool can bypass. It takes about fifteen seconds.")
+    say("")
+
+    needs_removal = build.extension_id_preserved and arc_has_store_extension()
+    if needs_removal:
+        warn("Arc already has the Store copy of Claude. This build shares the official")
+        detail("id, so Arc loads only one. Re-run with --new-id to keep both, or remove")
+        detail("the Store copy in the steps below — your choice.")
+        say("")
+
+    n = 1
+    if opened_page:
+        ok("Arc's extensions page is open for you.")
+    else:
+        step(n, f"In Arc, open  {Style.cyan('arc://extensions')}")
+        n += 1
+    if needs_removal:
+        step(n, f"Remove the existing {Style.bold('Claude')} extension (the Store copy).")
+        n += 1
+    step(n, f"Turn on {Style.bold('Developer mode')} — top-right toggle.")
+    n += 1
+    step(n, f"Click {Style.bold('Load unpacked')} and choose:")
+    detail(str(build.build_dir))
+    if revealed:
+        detail("(already revealed in Finder)")
+
+    say("")
+    say(f"  Then open Claude with the toolbar icon or {Style.bold('⌘E')}. It appears as a")
+    say("  side window with full page context — exactly like Chrome.")
+    say("")
+    rule()
+    say(f"  {Style.dim('Check status')}   claude-in-arc doctor")
+    say(f"  {Style.dim('Undo cleanly')}   claude-in-arc uninstall")
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    banner()
+
+    if not arc_installed():
+        warn("Arc isn't installed yet. I'll build the extension anyway; you'll need")
+        detail("Arc to load it — get it at https://arc.net")
+
+    heading("Preparing")
+    source = pick_source(args.source)
+    ok(f"Found the official Claude extension — {Style.bold(source.label)}")
+
+    # Integrity gate: verify authenticity before touching anything.
+    verify_official_source(source, allow_unverified=getattr(args, "allow_unverified", False))
+    if not getattr(args, "allow_unverified", False):
+        ok("Verified it's genuine — its signing key matches Anthropic's published id.")
+
+    build = build_extension(source, dry_run=args.dry_run, new_id=getattr(args, "new_id", False))
+    if args.dry_run:
+        warn("Dry run — nothing was written.")
+        return EXIT_OK
+
+    heading("Building")
+    ok("Repacked the extension for Arc.")
+    detail(str(build.build_dir))
+    if build.patched_pages:
+        ok("Added the side-panel compatibility shim (no-op on Chrome/Brave/Edge).")
+    if build.extension_id_preserved:
+        ok("Kept the official extension id — Claude Desktop integration stays valid.")
+    else:
+        ok("Built with a fresh id (Claude (Arc)) — coexists with the Store copy.")
+
+    if getattr(args, "link", True):
+        link = link_native_messaging(dry_run=False)
+        if link.status == "linked":
+            ok("Connected Arc to Claude Desktop (native messaging).")
+            detail(str(link.target))
+        elif link.status == "already":
+            ok("Arc is already connected to Claude Desktop.")
+        elif link.status == "missing-source":
+            info("Claude Desktop integration isn't set up yet — the chat works without it.")
+            detail("Enable the browser extension in Claude Desktop, then run: claude-in-arc link")
+
+    opened_page = False
+    revealed = False
+    if getattr(args, "open", True) and _VERBOSITY >= 1:
+        opened_page = _open_arc_extensions()
+        revealed = _reveal_in_finder(build.build_dir)
+
+    _print_next_steps(build, opened_page, revealed)
+    return EXIT_OK
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    banner()
+    heading("Building")
+    source = pick_source(args.source)
+    ok(f"Found the official Claude extension — {Style.bold(source.label)}")
+    verify_official_source(source, allow_unverified=getattr(args, "allow_unverified", False))
+    build = build_extension(source, dry_run=args.dry_run, new_id=getattr(args, "new_id", False))
+    if args.dry_run:
+        warn("Dry run — nothing was written.")
+        return EXIT_OK
+    ok("Repacked the extension for Arc.")
+    detail(str(build.build_dir))
+    return EXIT_OK
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    banner()
+    heading("Connecting Arc to Claude Desktop")
+    link = link_native_messaging(dry_run=args.dry_run)
+    if link.status == "linked":
+        ok("Connected.")
+        detail(f"{link.source}")
+        detail(f"→ {link.target}")
+    elif link.status == "already":
+        ok("Already connected — nothing to do.")
+    elif link.status == "dry-run":
+        info("[dry-run] would copy:")
+        detail(f"{link.source}")
+        detail(f"→ {link.target}")
+    elif link.status == "missing-source":
+        warn("No Claude native-messaging host found on this Mac yet.")
+        detail("Enable the browser extension in Claude Desktop (Settings), or install")
+        detail("Claude Code, then re-run: claude-in-arc link")
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    banner()
+    heading("Diagnostics")
+
+    problems = 0
+
+    if arc_installed():
+        ok("Arc is installed.")
+    else:
+        fail("Arc not detected. Install it from https://arc.net")
+        problems += 1
+
+    heading("Browsers")
+    browsers = installed_browsers()
+    if not browsers:
+        fail("No supported Chromium browsers detected.")
+        problems += 1
+    for b in browsers:
+        tag = Style.yellow(" (needs sidePanel patch)") if b.needs_patch else ""
+        ok(f"{b.name}{tag}")
+
+    heading("Claude extension")
+    sources = discover_sources()
+    if not sources:
+        fail("Official 'Claude in Chrome' extension not found in any browser.\n"
+             "    Install it: https://chromewebstore.google.com/detail/claude/"
+             + OFFICIAL_EXTENSION_ID)
+        problems += 1
+    for s in sources:
+        # Verify each discovered copy is authentic (purely informational here).
+        try:
+            verify_official_source(s)
+            ok(f"{s.label}  {Style.dim('[verified]')}")
+        except SecurityError:
+            warn(f"{s.label}  [could NOT verify authenticity]")
+
+    heading("Patched build")
+    if BUILD_EXTENSION_DIR.is_dir() and (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).is_file():
+        marker = json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8"))
+        ok(f"Present at {BUILD_EXTENSION_DIR}")
+        info(f"Built from {marker.get('source_browser')} v{marker.get('source_version')} "
+             f"(tool {marker.get('tool_version')})")
+    else:
+        warn("No patched build yet. Run 'claude-in-arc install'.")
+
+    heading("Loaded in Arc?")
+    if arc_has_patched_build_loaded():
+        ok("The patched build appears to be loaded in Arc.")
+    else:
+        warn("Patched build not detected in Arc yet. Load it via arc://extensions →\n"
+             "    Developer mode → Load unpacked. (If you just loaded it, this can lag.)")
+
+    heading("Conflicts")
+    if arc_has_store_extension():
+        warn("Arc has the Store copy of Claude installed. With the default build\n"
+             "    (same id) you must remove it; or rebuild with --new-id to keep both.")
+    else:
+        ok("No conflicting Store copy of Claude in Arc.")
+
+    heading("Claude Desktop integration")
+    src = find_native_host_manifest()
+    if src is None:
+        warn("No Claude native-messaging host found. Side-panel chat still works;\n"
+             "    enable the browser extension in Claude Desktop to add desktop\n"
+             "    integration, then run 'claude-in-arc link'.")
+    else:
+        ok(f"Found host manifest: {src}")
+        arc = arc_browser()
+        if arc and (_nmh_dir(arc) / NATIVE_HOST_FILENAME).is_file():
+            ok("Arc is linked to the native-messaging host.")
+        else:
+            warn("Arc is NOT linked yet. Run 'claude-in-arc link'.")
+
+    heading("Known limitation")
+    info("Claude Code '/chrome' browser automation is gated by a server-side flag")
+    detail("(chrome_ext_bridge_enabled) that Anthropic returns false for non-Chrome")
+    detail("browsers. No local tool can change that. The side-panel chat with page")
+    detail("context — which this tool enables — is unaffected.")
+
+    heading("Logs")
+    info(f"{LOG_FILE}")
+
+    say("")
+    if problems:
+        warn(f"{problems} item(s) need attention above.")
+        return EXIT_ERROR
+    ok("Everything looks healthy.")
+    return EXIT_OK
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    banner()
+    heading("Removing and rolling back")
+    state = read_state()
+    removed_any = False
+
+    # 1) Remove the patched build (path-safety enforced).
+    if BUILD_EXTENSION_DIR.exists():
+        if args.dry_run:
+            info(f"[dry-run] would remove {BUILD_EXTENSION_DIR}")
+        else:
+            _assert_within(BUILD_EXTENSION_DIR, BUILD_ROOT)
+            shutil.rmtree(BUILD_EXTENSION_DIR)
+            ok(f"Removed patched build: {BUILD_EXTENSION_DIR}")
+        removed_any = True
+
+    # 2) Restore or remove the native-messaging manifest we touched.
+    arc = arc_browser()
+    target = _nmh_dir(arc) / NATIVE_HOST_FILENAME if arc else None
+    backup = state.get("native_manifest_backup")
+    preexisted = state.get("native_manifest_preexisted", False)
+    if target and target.is_file():
+        if args.dry_run:
+            if backup:
+                info(f"[dry-run] would restore backup over {target}")
+            else:
+                info(f"[dry-run] would remove {target}")
+        else:
+            if backup and Path(backup).is_file() and preexisted:
+                shutil.copy2(backup, target)
+                Path(backup).unlink(missing_ok=True)
+                ok(f"Restored original native-messaging manifest from backup.")
+            else:
+                target.unlink()
+                ok(f"Removed Arc native-messaging manifest: {target}")
+        removed_any = True
+
+    # 3) Remove state + empty build root.
+    if not args.dry_run:
+        if _state_path().is_file():
+            _state_path().unlink(missing_ok=True)
+        if BUILD_ROOT.exists() and not any(BUILD_ROOT.iterdir()):
+            BUILD_ROOT.rmdir()
+
+    if not removed_any:
+        ok("Already clean — nothing to remove.")
+    else:
+        ok("Done. Everything this tool added has been rolled back.")
+    say("")
+    info("If you loaded the unpacked extension in Arc, remove it from arc://extensions too.")
+    return EXIT_OK
+
+
+def cmd_reveal(args: argparse.Namespace) -> int:
+    if not BUILD_EXTENSION_DIR.is_dir():
+        fail("No build to reveal yet — run 'claude-in-arc install' first.")
+        return EXIT_ERROR
+    _reveal_in_finder(BUILD_EXTENSION_DIR)
+    ok("Opened the extension folder in Finder.")
+    detail(str(BUILD_EXTENSION_DIR))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claude-in-arc",
+        description="Make the official 'Claude in Chrome' extension work in Arc.",
+    )
+    parser.add_argument("--version", action="version", version=f"claude-in-arc {TOOL_VERSION}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output (debug detail).")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Quiet output (errors only).")
+
+    sub = parser.add_subparsers(dest="command")
+
+    def add_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--dry-run", action="store_true", help="Preview without writing files.")
+
+    def add_new_id(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--new-id",
+            action="store_true",
+            help="Drop the manifest key so the build gets a fresh id and can coexist "
+            "with the Store copy of Claude. Native messaging then expects the official "
+            "id, so leave this off if you use Claude Desktop integration.",
+        )
+
+    def add_verify(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--allow-unverified",
+            action="store_true",
+            help="Skip the authenticity check (NOT recommended). Only for patching a "
+            "custom --source you fully trust.",
+        )
+
+    p_install = sub.add_parser("install", help="Build the patched extension and link native messaging (default).")
+    p_install.add_argument("--source", help="Path to an unpacked official extension to patch.")
+    p_install.add_argument("--no-open", dest="open", action="store_false",
+                           help="Don't auto-open Arc / reveal the folder.")
+    p_install.add_argument("--no-link", dest="link", action="store_false",
+                           help="Skip native-messaging mirroring.")
+    add_new_id(p_install)
+    add_verify(p_install)
+    add_common(p_install)
+    p_install.set_defaults(func=cmd_install, open=True, link=True)
+
+    p_build = sub.add_parser("build", help="Only (re)build the patched extension.")
+    p_build.add_argument("--source", help="Path to an unpacked official extension to patch.")
+    add_new_id(p_build)
+    add_verify(p_build)
+    add_common(p_build)
+    p_build.set_defaults(func=cmd_build)
+
+    p_link = sub.add_parser("link", help="Mirror the Claude native-messaging host into Arc.")
+    add_common(p_link)
+    p_link.set_defaults(func=cmd_link)
+
+    p_doctor = sub.add_parser("doctor", help="Diagnose the current setup.")
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    p_uninstall = sub.add_parser("uninstall", help="Remove the patched build and roll back changes.")
+    add_common(p_uninstall)
+    p_uninstall.set_defaults(func=cmd_uninstall)
+
+    p_reveal = sub.add_parser("reveal", help="Open the patched build folder in Finder.")
+    p_reveal.set_defaults(func=cmd_reveal)
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    if sys.platform != "darwin":
+        print("claude-in-arc currently supports macOS only.", file=sys.stderr)
+        return EXIT_USAGE
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    verbosity = 1
+    if getattr(args, "verbose", False):
+        verbosity = 2
+    if getattr(args, "quiet", False):
+        verbosity = 0
+    setup_logging(verbosity)
+
+    if not getattr(args, "command", None):
+        # Default to install with sensible defaults.
+        args.func = cmd_install
+        args.source = None
+        args.dry_run = False
+        args.new_id = False
+        args.open = True
+        args.link = True
+        args.allow_unverified = False
+
+    try:
+        return args.func(args)
+    except SecurityError as e:
+        fail(str(e))
+        return EXIT_ERROR
+    except CliError as e:
+        fail(str(e))
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
