@@ -194,8 +194,17 @@ See [STRATEGY.md](STRATEGY.md) for where this project is headed.
 `claude-in-arc` is free and MIT‑licensed, and the core will **always** stay that way — nothing is gated. If it saved you time, you can support continued maintenance:
 
 - ❤️ [GitHub Sponsors](https://github.com/sponsors/Zu9zwan9)
-- ☕ [Buy me a coffee](https://www.buymeacoffee.com/Zu9zwan9)
+- ☕ [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mbard-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/mbard)
 - ⭐ Star the repo and link it in Arc threads — visibility helps more than money.
+
+<!--
+  Official Buy Me a Coffee embed (slug: mbard). GitHub Markdown does NOT execute
+  <script> tags, so the clickable badge above is what actually renders here. This
+  snippet is preserved for any future HTML/GitHub Pages surface where the live
+  widget can run:
+
+  <script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="mbard" data-color="#FFDD00" data-emoji="" data-font="Cookie" data-text="Buy me a coffee" data-outline-color="#000000" data-font-color="#000000" data-coffee-color="#ffffff"></script>
+-->
 
 ## Credits & prior art
 
