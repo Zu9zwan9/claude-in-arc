@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.3"
+TOOL_VERSION = "1.2.4"
 
 # Product identity (cohesive voice across CLI + docs).
 PRODUCT_NAME = "Claude in Arc"
@@ -90,6 +90,21 @@ PAGES_TO_PATCH = ["options.html", "sidepanel.html"]
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 SHIM_SOURCE = ASSETS_DIR / SHIM_FILENAME
+
+
+def shim_version_label() -> str:
+    """Return SHIM_VERSION from the shim asset (e.g. '1.2.4')."""
+    try:
+        text = SHIM_SOURCE.read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    m = re.search(r'SHIM_VERSION\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else "unknown"
+
+
+def shim_content_hash(short: int = 12) -> str:
+    """SHA-256 of the shim asset for install verification."""
+    return hashlib.sha256(SHIM_SOURCE.read_bytes()).hexdigest()[:short]
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "claude-in-arc"
 LOG_FILE = LOG_DIR / "claude-in-arc.log"
@@ -665,6 +680,8 @@ def build_extension(
     marker = {
         "tool": "claude-in-arc",
         "tool_version": TOOL_VERSION,
+        "shim_version": shim_version_label(),
+        "shim_hash": shim_content_hash(),
         "source_browser": source.browser.name,
         "source_version": source.version,
         "extension_id_preserved": key_present,
@@ -1180,6 +1197,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     detail(str(build.build_dir))
     if build.patched_pages:
         ok("Added the side-panel compatibility shim (no-op on Chrome/Brave/Edge).")
+        detail(f"shim v{shim_version_label()} sha256:{shim_content_hash()}")
     if build.extension_id_preserved:
         ok("Kept the official extension id — Claude Desktop integration stays valid.")
     else:
@@ -1218,6 +1236,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         return EXIT_OK
     ok("Repacked the extension for Arc.")
     detail(str(build.build_dir))
+    detail(f"shim v{shim_version_label()} sha256:{shim_content_hash()}")
     return EXIT_OK
 
 

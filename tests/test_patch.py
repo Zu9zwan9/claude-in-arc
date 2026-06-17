@@ -156,6 +156,12 @@ class PatchEngineTests(unittest.TestCase):
         core.build_extension(self._source(ext), dry_run=True)
         self.assertFalse(core.BUILD_EXTENSION_DIR.exists())
 
+    def test_shim_version_and_hash_helpers(self):
+        self.assertEqual(core.shim_version_label(), "1.2.4")
+        h = core.shim_content_hash()
+        self.assertEqual(len(h), 12)
+        self.assertTrue(all(c in "0123456789abcdef" for c in h))
+
 
 class NativeMessagingTests(unittest.TestCase):
     def test_allowed_origin_added_when_missing(self):

@@ -70,6 +70,12 @@ function makeChrome(opts) {
       id: "test-extension-id",
       lastError: undefined,
       getURL: (p) => "chrome-extension://test-extension-id/" + p,
+      onMessage: {
+        addListener(fn) {
+          calls.messageListeners = calls.messageListeners || [];
+          calls.messageListeners.push(fn);
+        },
+      },
     },
     storage: {
       session: {
@@ -92,6 +98,13 @@ function makeChrome(opts) {
     },
     windows: {
       create(createOpts, cb) {
+        calls.windowsCreate.push({ opts: createOpts, failed: !!opts.failWindowsCreate });
+        if (opts.failWindowsCreate) {
+          chrome.runtime.lastError = { message: "windows.create blocked" };
+          if (cb) cb();
+          return;
+        }
+        chrome.runtime.lastError = undefined;
         const id = nextWinId++;
         const tabId = 9000 + id;
         const win = {
@@ -100,7 +113,7 @@ function makeChrome(opts) {
           tabs: [{ id: tabId, url: createOpts.url }],
         };
         wins[id] = win;
-        calls.windowsCreate.push({ opts: createOpts, win });
+        calls.windowsCreate[calls.windowsCreate.length - 1].win = win;
         if (cb) cb(win);
       },
       get(id, getInfo, cb) {
@@ -119,6 +132,13 @@ function makeChrome(opts) {
       update(id, updateProps, cb) {
         calls.tabsUpdate.push({ id, updateProps });
         if (cb) cb();
+      },
+      create(createOpts, cb) {
+        calls.tabsCreate = calls.tabsCreate || [];
+        chrome.runtime.lastError = undefined;
+        const tab = { id: 8000 + calls.tabsCreate.length, url: createOpts.url, active: createOpts.active };
+        calls.tabsCreate.push({ opts: createOpts, tab });
+        if (cb) cb(tab);
       },
       onActivated: { addListener() {} },
       onUpdated: { addListener() {} },
@@ -141,6 +161,13 @@ function makeChrome(opts) {
         },
       },
     },
+    notifications: {
+      create(id, opts, cb) {
+        calls.notifications = calls.notifications || [];
+        calls.notifications.push({ id, opts });
+        if (cb) cb();
+      },
+    },
   };
 
   if (opts.withRealSidePanel) {
@@ -153,10 +180,10 @@ function makeChrome(opts) {
 
 // Load the shim against a given mock chrome, returning the (possibly polyfilled)
 // chrome.sidePanel. The shim is an IIFE that reads the global `chrome`.
-function loadShim(mockChrome) {
+function loadShim(mockChrome, sandboxExtras) {
   const sandbox = {
     chrome: mockChrome,
-    navigator: { userAgent: "node-harness" },
+    navigator: { userAgent: (sandboxExtras && sandboxExtras.userAgent) || "node-harness" },
     console,
     Map,
     Promise,
@@ -337,6 +364,45 @@ async function main() {
       env.calls.windowsCreate[0].opts.url.indexOf("tabId=4242") !== -1,
       "toggle-side-panel must target active tab"
     );
+  }
+
+  // --- Scenario 8: tabs.create fallback when windows.create is blocked --------
+  {
+    const env = makeChrome({ failWindowsCreate: true });
+    loadShim(env.chrome);
+    await replayVe(env.chrome, 9999);
+    assert(env.calls.windowsCreate.length >= 2, "should attempt popup and normal windows.create");
+    assert(env.calls.tabsCreate && env.calls.tabsCreate.length === 1, "must fall back to tabs.create");
+    assert(
+      env.calls.tabsCreate[0].opts.url ===
+        "chrome-extension://test-extension-id/sidepanel.html?tabId=9999",
+      "tabs.create URL must carry tabId"
+    );
+  }
+
+  // --- Scenario 9: Arc UA forces shim even with native-looking bindings -------
+  {
+    const env = makeChrome();
+    function nativeLike(name) {
+      const fn = function () {};
+      fn.toString = function () {
+        return "function " + name + "() { [native code] }";
+      };
+      return fn;
+    }
+    env.chrome.sidePanel = {
+      open: nativeLike("open"),
+      setOptions: nativeLike("setOptions"),
+    };
+    const sp = loadShim(env.chrome, { userAgent: "Mozilla/5.0 Arc/1.0 Chrome/120" });
+    assert(sp && sp.__claudeInArcShim === true, "Arc UA must force shim over native-looking stubs");
+    await replayVe(env.chrome, 1111);
+    assert(env.calls.windowsCreate.length === 1, "forced shim must open popup");
+  }
+
+  // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
+  {
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.4"') !== -1, "shim must declare SHIM_VERSION 1.2.4");
   }
 
   console.log("OK: open_side_panel path produces popup-window behavior via the shim");
