@@ -7,9 +7,8 @@ reports a conflict, or you want to confirm every layer of the install.
 daily-use guide. Use this document when you need expected-vs-actual detail for
 each check, service worker console inspection, or a copy-paste recovery recipe.
 
-Current tool version: **v1.2.22** (split popup waits for Arc window geometry before
-create; bounds retries at 0/50/150/300/500/1000ms; refocuses Arc after dock;
-verifies gutter alignment).
+Current tool version: **v1.2.23** (doctor prints honest Arc expectations; sidebar mode
+auto-migrates to split on Arc).
 
 Previous: v1.2.17 split popup retries gutter alignment at 0/50/150ms on macOS Arc;
 v1.2.20 fixes double blank arc://new-tab-page window; closing the OS popup window

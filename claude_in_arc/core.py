@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.22"
+TOOL_VERSION = "1.2.23"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -658,14 +658,21 @@ def _patch_web_accessible_resources(manifest: Dict, resource: str) -> bool:
     return True
 
 
+def _normalize_panel_mode(mode: str) -> str:
+    """On Arc, in-page sidebar is blocked — use split-panel instead."""
+    if mode not in VALID_PANEL_MODES:
+        return "split" if arc_installed() else "popup"
+    if mode == "sidebar" and arc_installed():
+        return "split"
+    return mode
+
+
 def _panel_mode_from_state() -> str:
     state = read_state()
     if PANEL_MODE_STATE_KEY not in state:
         return "split" if arc_installed() else "popup"
     mode = state.get(PANEL_MODE_STATE_KEY, "popup")
-    if mode in VALID_PANEL_MODES:
-        return mode
-    return "split" if arc_installed() else "popup"
+    return _normalize_panel_mode(mode)
 
 
 def _default_panel_mode_for_install() -> str:
@@ -711,6 +718,7 @@ def build_extension(
         raise CliError(
             f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, or split)"
         )
+    panel_mode = _normalize_panel_mode(panel_mode)
 
     manifest = _read_manifest(source.path)
 
@@ -1867,6 +1875,30 @@ def _doctor_arc_extension(verbose: bool = False) -> int:
     return problems
 
 
+def _doctor_arc_expectations() -> None:
+    """Honest Arc UX — separate OS window is expected, not Chrome's in-browser panel."""
+    heading("Arc — what this tool can and cannot do")
+    info("Arc has no chrome.sidePanel. Claude opens in a separate OS window, not inside Arc.")
+    detail(
+        "A chrome-extension://…/sidepanel.html?tabId=N URL in that window is normal — "
+        "not evidence the patch failed."
+    )
+    info("Split mode (default): page shrinks left (~410px); a narrow window docks on the right.")
+    detail(
+        "It may still appear as its own window in ⌘Tab — Arc cannot embed extension UI "
+        "in-browser. See docs/ARC_LIMITATIONS.md."
+    )
+    info("Chat is working if: the window opens, you can type, and Claude answers about the current page.")
+    detail(
+        "After claude-in-arc upgrade: click Reload on arc://extensions "
+        "(Arc does not expose Reload to automation)."
+    )
+    detail(
+        "WebSocket errors to bridge.claudeusercontent.com are expected — "
+        "Claude Code /chrome only; side-panel chat does not use that bridge."
+    )
+
+
 def _doctor_split_panel(verbose: bool = False) -> int:
     """Return number of split-panel setup problems on Arc."""
     if not arc_installed():
@@ -1887,15 +1919,19 @@ def _doctor_split_panel(verbose: bool = False) -> int:
         problems += 1
 
     marker = json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8"))
-    mode = marker.get("panel_mode", "popup")
-    if mode == "split":
+    raw_mode = marker.get("panel_mode", "popup")
+    mode = _normalize_panel_mode(raw_mode)
+    if raw_mode == "sidebar" and mode == "split":
+        warn("Build panel mode: sidebar — not supported on Arc (runtime uses split).")
+        detail("Run: claude-in-arc config --panel-mode split  then Reload on arc://extensions")
+    elif mode == "split":
         ok("Build panel mode: split (Arc default)")
     elif mode == "popup":
         warn("Build panel mode: popup — page margin disabled on Arc.")
         detail("Run: claude-in-arc config --panel-mode split")
         problems += 1
     else:
-        info(f"Build panel mode: {mode} (Arc uses split at runtime for sidebar)")
+        info(f"Build panel mode: {mode}")
 
     info("Expected on Arc: page shrinks left (~410px), docked popup flush on the right,")
     detail("page margin + invisible resize strip; popup docks over the gutter.")
@@ -1974,10 +2010,12 @@ def _print_verify_walkthrough() -> None:
             SPLIT_HOST_FILENAME,
         ),
         (
-            "Arc panel mode is split",
+            "Arc panel mode is split (sidebar OK — runtime uses split)",
             (
-                json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8")).get(
-                    "panel_mode"
+                _normalize_panel_mode(
+                    json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8")).get(
+                        "panel_mode", "popup"
+                    )
                 )
                 == "split"
                 if build_ok
@@ -2070,6 +2108,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     problems += _doctor_arc_extension(verbose=verbose)
     if arc_installed():
+        _doctor_arc_expectations()
         problems += _doctor_split_panel(verbose=verbose)
     problems += _doctor_conflicts()
 
@@ -2230,10 +2269,15 @@ def cmd_config(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     state = read_state()
+    saved_mode = panel_mode
+    panel_mode = _normalize_panel_mode(panel_mode)
     state[PANEL_MODE_STATE_KEY] = panel_mode
     write_state(state)
-    ok(f"Panel mode preference saved: {Style.bold(panel_mode)}")
-    if panel_mode == "sidebar" and arc_installed():
+    if saved_mode == "sidebar" and panel_mode == "split" and arc_installed():
+        ok(f"Panel mode saved as {Style.bold('split')} (sidebar is not supported on Arc).")
+    else:
+        ok(f"Panel mode preference saved: {Style.bold(panel_mode)}")
+    if saved_mode == "sidebar" and arc_installed():
         say("")
         _arc_sidebar_unsupported_warning()
     if panel_mode == "split" and not arc_installed():

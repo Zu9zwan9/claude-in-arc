@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.22";
+  var SHIM_VERSION = "1.2.23";
 
   function log() {
     try {

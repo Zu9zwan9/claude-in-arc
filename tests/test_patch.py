@@ -154,14 +154,25 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_panel_mode_sidebar_baked_into_shim(self):
         ext = make_fixture(self.src_root)
-        result = core.build_extension(
-            self._source(ext), dry_run=False, panel_mode="sidebar"
-        )
+        with patch.object(core, "arc_installed", return_value=False):
+            result = core.build_extension(
+                self._source(ext), dry_run=False, panel_mode="sidebar"
+            )
         shim = (result.build_dir / core.SHIM_FILENAME).read_text()
         self.assertIn('var DEFAULT_PANEL_MODE = "sidebar";', shim)
         self.assertEqual(result.panel_mode, "sidebar")
         marker = json.loads((result.build_dir / core.PATCH_MARKER_FILENAME).read_text())
         self.assertEqual(marker.get("panel_mode"), "sidebar")
+
+    def test_panel_mode_sidebar_normalizes_to_split_on_arc(self):
+        ext = make_fixture(self.src_root)
+        with patch.object(core, "arc_installed", return_value=True):
+            result = core.build_extension(
+                self._source(ext), dry_run=False, panel_mode="sidebar"
+            )
+        shim = (result.build_dir / core.SHIM_FILENAME).read_text()
+        self.assertIn('var DEFAULT_PANEL_MODE = "split";', shim)
+        self.assertEqual(result.panel_mode, "split")
 
     def test_pages_get_shim_injected_once(self):
         ext = make_fixture(self.src_root)
@@ -259,7 +270,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.22")
+        self.assertEqual(core.shim_version_label(), "1.2.23")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))
@@ -703,7 +714,7 @@ class UpgradeTests(unittest.TestCase):
             core, "_arc_click_reload_extension", return_value=(False, "reload_not_found")
         ), patch.object(core, "_open_url_in_arc", return_value=True), patch.object(
             core, "_arc_send_toggle_side_panel", return_value=(True, "sent")
-        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.22")):
+        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.23")):
             rc = core.cmd_upgrade(args)
         self.assertEqual(rc, core.EXIT_ERROR)
 
