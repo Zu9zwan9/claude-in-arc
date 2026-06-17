@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.23"
+TOOL_VERSION = "1.2.24"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -112,7 +112,7 @@ SIDEBAR_BRIDGE_JS_SOURCE = ASSETS_DIR / SIDEBAR_BRIDGE_JS_FILENAME
 SIDEBAR_HOST_SOURCE = ASSETS_DIR / SIDEBAR_HOST_FILENAME
 SPLIT_HOST_SOURCE = ASSETS_DIR / SPLIT_HOST_FILENAME
 
-VALID_PANEL_MODES = ("popup", "sidebar", "split")
+VALID_PANEL_MODES = ("popup", "sidebar", "split", "hud")
 
 
 def shim_version_label() -> str:
@@ -618,11 +618,11 @@ def _apply_panel_mode_to_shim(shim_path: Path, panel_mode: str) -> None:
     """Bake default panel mode into the copied shim (popup | sidebar | split)."""
     if panel_mode not in VALID_PANEL_MODES:
         raise CliError(
-            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, or split)"
+            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, split, or hud)"
         )
     text = shim_path.read_text(encoding="utf-8")
     updated, count = re.subn(
-        r'var DEFAULT_PANEL_MODE = "(?:popup|sidebar|split)";',
+        r'var DEFAULT_PANEL_MODE = "(?:popup|sidebar|split|hud)";',
         f'var DEFAULT_PANEL_MODE = "{panel_mode}";',
         text,
         count=1,
@@ -721,7 +721,7 @@ def build_extension(
         panel_mode = _default_panel_mode_for_install()
     if panel_mode not in VALID_PANEL_MODES:
         raise CliError(
-            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, or split)"
+            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, split, or hud)"
         )
     panel_mode = _normalize_panel_mode(panel_mode)
 
@@ -1984,8 +1984,11 @@ def cmd_hud(args: argparse.Namespace) -> int:
             ok("Registered HUD host in Arc.")
             detail(str(result.target))
             detail(str(result.binary))
+            detail("Run: claude-in-arc hud open  (menu-bar app must be running)")
+            detail("Then: claude-in-arc config --panel-mode hud  and Reload arc://extensions")
         elif result.status == "already":
             ok("HUD host already registered.")
+            detail("Run: claude-in-arc hud open  and config --panel-mode hud if not set yet")
         elif result.status == "dry-run":
             info("[dry-run] would write HUD manifest:")
             detail(str(result.target))
@@ -2145,6 +2148,8 @@ def _doctor_split_panel(verbose: bool = False) -> int:
     if raw_mode == "sidebar" and mode == "split":
         warn("Build panel mode: sidebar — not supported on Arc (runtime uses split).")
         detail("Run: claude-in-arc config --panel-mode split  then Reload on arc://extensions")
+    elif mode == "hud":
+        ok("Build panel mode: hud (notch HUD + native messaging)")
     elif mode == "split":
         ok("Build panel mode: split (Arc default)")
     elif mode == "popup":
@@ -2484,8 +2489,9 @@ def cmd_config(args: argparse.Namespace) -> int:
         detail("split   — page margin + docked window on Arc (default on Arc)")
         detail("popup   — docked ~410px window flush to browser right edge")
         detail("sidebar — in-page right column on Chrome/Brave (not supported on Arc)")
+        detail("hud     — notch HUD via native messaging (macOS; run claude-in-arc hud install)")
         detail("")
-        detail("Set mode:  claude-in-arc config --panel-mode split|popup|sidebar")
+        detail("Set mode:  claude-in-arc config --panel-mode split|popup|sidebar|hud")
         detail("Then Reload the extension in arc://extensions")
         return EXIT_OK
 
@@ -2501,6 +2507,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     if saved_mode == "sidebar" and arc_installed():
         say("")
         _arc_sidebar_unsupported_warning()
+    if panel_mode == "hud" and not arc_installed():
+        warn("HUD mode is designed for Arc + the ClaudeInArcHUD companion on macOS.")
     if panel_mode == "split" and not arc_installed():
         warn("Split-panel mode is designed for Arc. On Chrome/Brave the shim uses popup.")
 

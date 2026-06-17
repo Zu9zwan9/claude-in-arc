@@ -141,6 +141,17 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("sidepanel.html", bridge_js)
         self.assertIn("chrome.runtime.getURL", bridge_js)
 
+    def test_panel_mode_hud_baked_into_shim(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(
+            self._source(ext), dry_run=False, panel_mode="hud"
+        )
+        shim = (result.build_dir / core.SHIM_FILENAME).read_text()
+        self.assertIn('var DEFAULT_PANEL_MODE = "hud";', shim)
+        self.assertEqual(result.panel_mode, "hud")
+        marker = json.loads((result.build_dir / core.PATCH_MARKER_FILENAME).read_text())
+        self.assertEqual(marker.get("panel_mode"), "hud")
+
     def test_panel_mode_split_baked_into_shim(self):
         ext = make_fixture(self.src_root)
         result = core.build_extension(
@@ -270,7 +281,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.23")
+        self.assertEqual(core.shim_version_label(), "1.2.24")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))

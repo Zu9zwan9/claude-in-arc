@@ -4,6 +4,8 @@ import Foundation
 /// Protocol: 4-byte little-endian length + UTF-8 JSON per message on stdin/stdout.
 /// Message schema: native/schemas/hud-message-v1.json
 
+private let hudNotificationName = Notification.Name("com.claudeinarac.hud.message")
+
 private struct InboundMessage: Decodable {
     var v: Int?
     var dir: String?
@@ -40,6 +42,21 @@ func writeMessage<T: Encodable>(_ message: T, to handle: FileHandle) {
     handle.write(json)
 }
 
+fileprivate func forwardToApp(_ decoded: InboundMessage) {
+    guard let type = decoded.type else { return }
+    var info: [String: Any] = ["type": type]
+    if let tabId = decoded.tabId { info["tabId"] = tabId }
+    if let url = decoded.url { info["url"] = url }
+    if let title = decoded.title { info["title"] = title }
+    if let collapsed = decoded.collapsed { info["collapsed"] = collapsed }
+    if let visible = decoded.visible { info["visible"] = visible }
+    DistributedNotificationCenter.default().post(
+        name: hudNotificationName,
+        object: nil,
+        userInfo: info
+    )
+}
+
 let stdin = FileHandle.standardInput
 let stdout = FileHandle.standardOutput
 let stderr = FileHandle.standardError
@@ -58,15 +75,28 @@ while let data = readMessage(from: stdin) {
     case "ping":
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "toggle_hud":
+        if let decoded { forwardToApp(decoded) }
         writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
     case "set_collapsed":
+        if let decoded { forwardToApp(decoded) }
         let collapsed = decoded?.collapsed ?? true
         writeMessage(
             OutboundMessage(type: collapsed ? "hud_collapsed" : "hud_expanded", expanded: !collapsed),
             to: stdout
         )
     case "page_context":
-        // M2: forward to menu-bar app via XPC / distributed notification.
+        if let decoded { forwardToApp(decoded) }
+        writeMessage(OutboundMessage(type: "pong"), to: stdout)
+    case "sidebar_state":
+        if let decoded {
+            if decoded.visible == false {
+                forwardToApp(InboundMessage(type: "set_collapsed", collapsed: true))
+            } else if decoded.visible == true {
+                forwardToApp(InboundMessage(type: "toggle_hud"))
+            } else {
+                forwardToApp(decoded)
+            }
+        }
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     default:
         writeMessage(OutboundMessage(type: "pong"), to: stdout)

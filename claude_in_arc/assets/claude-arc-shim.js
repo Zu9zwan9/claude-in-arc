@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.23";
+  var SHIM_VERSION = "1.2.24";
 
   function log() {
     try {
@@ -204,6 +204,7 @@
   var SIDEBAR_BRIDGE_PAGE = "claude-arc-sidebar-bridge.html";
   var SIDEBAR_HOST_FILE = "claude-arc-sidebar-host.js";
   var SPLIT_HOST_FILE = "claude-arc-split-host.js";
+  var HUD_HOST_NAME = "com.claudeinarac.hud";
   // Overridden at build time by `claude-in-arc install --panel-mode …`.
   var DEFAULT_PANEL_MODE = "popup";
   var DEFAULT_PATH = "sidepanel.html";
@@ -252,11 +253,19 @@
   var splitLastShowTabId = null;
   // Arc defaults to split unless the user explicitly chose popup-only.
   var arcExplicitPopupMode = false;
-  var cachedPanelMode = isArcBrowser() ? "split" : DEFAULT_PANEL_MODE;
+  var cachedPanelMode =
+    DEFAULT_PANEL_MODE === "hud"
+      ? "hud"
+      : isArcBrowser()
+        ? "split"
+        : DEFAULT_PANEL_MODE;
   var memSidebarTabId = null;
   var memSplitTabId = null;
   var memSplitWidth = POPUP_WIDTH;
   var panelModeMenuWired = false;
+  var hudPort = null;
+  var hudReady = false;
+  var hudLifecycleWired = false;
 
   // Chrome tab ids are numbers; some callers pass strings (runtime messages, JSON).
   // Strict equality (5 !== "5") caused duplicate opens to hide then re-show margin.
@@ -384,12 +393,191 @@
   // margin injection with a docked popup (not an iframe). Popup-only stays available
   // only when the user explicitly chose it (arcExplicitPopupMode).
   function effectivePanelMode() {
+    if (cachedPanelMode === "hud") return "hud";
     if (isArcBrowser()) {
       if (arcExplicitPopupMode) return "popup";
       return "split";
     }
     if (cachedPanelMode === "split") return "popup";
     return cachedPanelMode;
+  }
+
+  function isHudMode() {
+    return effectivePanelMode() === "hud";
+  }
+
+  function disconnectHudPort() {
+    if (!hudPort) return;
+    try {
+      hudPort.disconnect();
+    } catch (_e) {
+      /* no-op */
+    }
+    hudPort = null;
+    hudReady = false;
+  }
+
+  function ensureHudPort() {
+    if (!isServiceWorkerContext() || !isHudMode()) return null;
+    if (hudPort) return hudPort;
+    if (!chrome.runtime.connectNative) {
+      warn("HUD mode: chrome.runtime.connectNative unavailable");
+      return null;
+    }
+    try {
+      hudPort = chrome.runtime.connectNative(HUD_HOST_NAME);
+      hudPort.onMessage.addListener(function (msg) {
+        handleHudHostMessage(msg);
+      });
+      hudPort.onDisconnect.addListener(function () {
+        var err = chrome.runtime.lastError;
+        if (err) {
+          warn("HUD native port disconnected:", err.message || String(err));
+        } else {
+          log("HUD native port disconnected");
+        }
+        hudPort = null;
+        hudReady = false;
+      });
+      log("connected native HUD host " + HUD_HOST_NAME);
+      return hudPort;
+    } catch (e) {
+      warn("connectNative(" + HUD_HOST_NAME + ") failed:", e && e.message ? e.message : String(e));
+      hudPort = null;
+      return null;
+    }
+  }
+
+  function sendHudMessage(payload) {
+    var port = ensureHudPort();
+    if (!port) return false;
+    try {
+      port.postMessage(payload);
+      return true;
+    } catch (e) {
+      warn("HUD postMessage failed:", e && e.message ? e.message : String(e));
+      disconnectHudPort();
+      return false;
+    }
+  }
+
+  function hudSendPageContext(tab) {
+    if (!tab || tab.id == null) return false;
+    return sendHudMessage({
+      v: 1,
+      dir: "ext_to_host",
+      type: "page_context",
+      tabId: tab.id,
+      url: tab.url || "",
+      title: tab.title || "",
+    });
+  }
+
+  function pushActivePageContext() {
+    if (!isHudMode()) return;
+    try {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+        void chrome.runtime.lastError;
+        var tab = tabs && tabs[0];
+        if (tab && tab.id != null) {
+          hudSendPageContext(tab);
+          return;
+        }
+        chrome.tabs.query({ active: true, currentWindow: true }, function (tabs2) {
+          void chrome.runtime.lastError;
+          if (tabs2 && tabs2[0]) hudSendPageContext(tabs2[0]);
+        });
+      });
+    } catch (_e) {
+      /* no-op */
+    }
+  }
+
+  function handleHudHostMessage(msg) {
+    if (!msg || msg.dir !== "host_to_ext" || !msg.type) return;
+    switch (msg.type) {
+      case "hud_ready":
+        hudReady = true;
+        pushActivePageContext();
+        break;
+      case "request_page_context":
+        pushActivePageContext();
+        break;
+      case "hud_expanded":
+      case "hud_collapsed":
+      case "pong":
+        break;
+      default:
+        log("HUD host message type=" + msg.type);
+    }
+  }
+
+  function hudToggle() {
+    return sendHudMessage({ v: 1, dir: "ext_to_host", type: "toggle_hud" });
+  }
+
+  function wireHudLifecycle() {
+    if (!isServiceWorkerContext() || hudLifecycleWired) return;
+    hudLifecycleWired = true;
+    if (!chrome.tabs) return;
+
+    function maybePushTab(tab) {
+      if (!isHudMode() || !tab) return;
+      hudSendPageContext(tab);
+    }
+
+    try {
+      if (chrome.tabs.onActivated) {
+        chrome.tabs.onActivated.addListener(function (info) {
+          if (!isHudMode() || !info || info.tabId == null) return;
+          chrome.tabs.get(info.tabId, function (tab) {
+            void chrome.runtime.lastError;
+            maybePushTab(tab);
+          });
+        });
+      }
+      if (chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener(function (_tabId, changeInfo, tab) {
+          if (!isHudMode()) return;
+          if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
+            maybePushTab(tab);
+          }
+        });
+      }
+      log("wired HUD page-context listeners");
+    } catch (_e) {
+      hudLifecycleWired = false;
+    }
+  }
+
+  function openPanelInHud(tabId, reason) {
+    tabId = normalizeTabId(tabId);
+    log(
+      "openPanelInHud tabId=" +
+        tabId +
+        " reason=" +
+        (reason || "unknown")
+    );
+    ensureHudPort();
+    if (tabId != null) {
+      try {
+        chrome.tabs.get(tabId, function (tab) {
+          void chrome.runtime.lastError;
+          if (tab) hudSendPageContext(tab);
+        });
+      } catch (_e) {
+        /* no-op */
+      }
+    } else {
+      pushActivePageContext();
+    }
+    if (!hudToggle()) {
+      notifyOpenFailure(
+        "Could not reach Claude HUD. Run: claude-in-arc hud install, then Reload in arc://extensions."
+      );
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(true);
   }
 
   function activePanelWidth() {
@@ -503,7 +691,16 @@
       chrome.storage.local.get([PANEL_MODE_KEY], function (stored) {
         void chrome.runtime.lastError;
         var mode = stored && stored[PANEL_MODE_KEY];
-        if (mode === "sidebar" || mode === "popup" || mode === "split") {
+        if (mode === "sidebar" || mode === "popup" || mode === "split" || mode === "hud") {
+          if (DEFAULT_PANEL_MODE === "hud" && mode !== "hud") {
+            cachedPanelMode = "hud";
+            setPanelMode("hud");
+            if (isHudMode()) {
+              ensureHudPort();
+              wireHudLifecycle();
+            }
+            return;
+          }
           if (mode === "sidebar" && isArcBrowser()) {
             warn("in-page sidebar is not supported on Arc; using split-panel mode");
             cachedPanelMode = "split";
@@ -526,17 +723,34 @@
           } else {
             cachedPanelMode = mode;
             log("panel mode=" + mode);
+            if (mode === "hud") {
+              ensureHudPort();
+              wireHudLifecycle();
+            } else {
+              disconnectHudPort();
+            }
           }
+        } else if (DEFAULT_PANEL_MODE === "hud") {
+          cachedPanelMode = "hud";
+          setPanelMode("hud");
+          ensureHudPort();
+          wireHudLifecycle();
         }
       });
       if (chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener(function (changes, area) {
           if (area !== "local" || !changes[PANEL_MODE_KEY]) return;
           var next = changes[PANEL_MODE_KEY].newValue;
-          if (next === "sidebar" || next === "popup" || next === "split") {
+          if (next === "sidebar" || next === "popup" || next === "split" || next === "hud") {
             cachedPanelMode = next;
             if (isArcBrowser()) {
               arcExplicitPopupMode = next === "popup";
+            }
+            if (next === "hud") {
+              ensureHudPort();
+              wireHudLifecycle();
+            } else {
+              disconnectHudPort();
             }
             log("panel mode changed to " + next);
           }
@@ -548,7 +762,7 @@
   }
 
   function setPanelMode(mode, callback, options) {
-    if (mode !== "sidebar" && mode !== "popup" && mode !== "split") {
+    if (mode !== "sidebar" && mode !== "popup" && mode !== "split" && mode !== "hud") {
       if (callback) callback(false);
       return;
     }
@@ -564,6 +778,12 @@
     cachedPanelMode = mode;
     if (isArcBrowser()) {
       arcExplicitPopupMode = mode === "popup" && !!(options && options.explicit);
+    }
+    if (mode === "hud") {
+      ensureHudPort();
+      wireHudLifecycle();
+    } else {
+      disconnectHudPort();
     }
     if (!chrome.storage || !chrome.storage.local) {
       if (callback) callback(true);
@@ -1475,6 +1695,18 @@
           void chrome.runtime.lastError;
         }
       );
+      chrome.contextMenus.create(
+        {
+          id: "claude-in-arc-panel-mode-hud",
+          title: "Panel mode: Notch HUD (macOS)",
+          contexts: ["action"],
+          type: "radio",
+          checked: cachedPanelMode === "hud",
+        },
+        function () {
+          void chrome.runtime.lastError;
+        }
+      );
       chrome.contextMenus.onClicked.addListener(function (info) {
         if (!info || !info.menuItemId) return;
         if (info.menuItemId === "claude-in-arc-panel-mode-popup") {
@@ -1483,6 +1715,8 @@
           setPanelMode("sidebar", null, { explicit: true });
         } else if (info.menuItemId === "claude-in-arc-panel-mode-split") {
           setPanelMode("split", null, { explicit: true });
+        } else if (info.menuItemId === "claude-in-arc-panel-mode-hud") {
+          setPanelMode("hud", null, { explicit: true });
         }
       });
       log("wired action context menu for panel mode");
@@ -2284,6 +2518,10 @@
         path
     );
 
+    if (effectivePanelMode() === "hud") {
+      return openPanelInHud(tabId, reason);
+    }
+
     if (effectivePanelMode() === "sidebar" && tabId != null) {
       return openPanelInSidebar(tabId, reason);
     }
@@ -2575,7 +2813,11 @@
   wireToolbarOpenHandlers();
   wireSidebarLifecycle();
   wireSplitLifecycle();
+  wireHudLifecycle();
   wirePanelModeContextMenu();
+  if (isHudMode()) {
+    ensureHudPort();
+  }
 
   // Upstream may register after us; re-assert cleared popup + handlers.
   if (isServiceWorkerContext()) {

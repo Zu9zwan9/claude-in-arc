@@ -6,8 +6,23 @@ public final class HUDPanelController {
     public static let defaultHeight: CGFloat = 520
 
     private var panel: NSPanel?
+    private var placeholderView: HUDPlaceholderView?
+
+    public private(set) var pageTitle = ""
+    public private(set) var pageURL = ""
+    public private(set) var pageTabId: Int?
 
     public init() {}
+
+    public func updatePageContext(title: String, url: String, tabId: Int?) {
+        pageTitle = title
+        pageURL = url
+        pageTabId = tabId
+        placeholderView?.pageTitle = title
+        placeholderView?.pageURL = url
+        placeholderView?.pageTabId = tabId
+        placeholderView?.needsDisplay = true
+    }
 
     public var isVisible: Bool {
         panel?.isVisible == true
@@ -45,8 +60,12 @@ public final class HUDPanelController {
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
 
-        let placeholder = NSHostingPlaceholderView(frame: panel.contentView?.bounds ?? .zero)
+        let placeholder = HUDPlaceholderView(frame: panel.contentView?.bounds ?? .zero)
+        placeholder.pageTitle = pageTitle
+        placeholder.pageURL = pageURL
+        placeholder.pageTabId = pageTabId
         panel.contentView = placeholder
+        placeholderView = placeholder
 
         positionBelowMenuBar(panel)
         panel.orderFrontRegardless()
@@ -83,19 +102,46 @@ public final class HUDPanelController {
 }
 
 /// Minimal placeholder until WKWebView loads extension sidepanel.html.
-private final class NSHostingPlaceholderView: NSView {
+private final class HUDPlaceholderView: NSView {
+    var pageTitle = ""
+    var pageURL = ""
+    var pageTabId: Int?
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         NSColor.windowBackgroundColor.setFill()
         dirtyRect.fill()
 
-        let text = "Claude in Arc HUD (scaffold)\n\nNative messaging + sidepanel bridge TBD."
+        var lines = ["Claude in Arc HUD", ""]
+        if !pageTitle.isEmpty {
+            lines.append(pageTitle)
+        }
+        if !pageURL.isEmpty {
+            lines.append(pageURL)
+        }
+        if let tabId = pageTabId {
+            lines.append("tabId: \(tabId)")
+        }
+        if pageTitle.isEmpty && pageURL.isEmpty {
+            lines.append("Browse in Arc — page context appears here.")
+        }
+        lines.append("")
+        lines.append("Chat bridge (M3)")
+
+        let text = lines.joined(separator: "\n")
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineSpacing = 3
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph,
         ]
         let attributed = NSAttributedString(string: text, attributes: attrs)
-        let size = attributed.size()
+        let size = attributed.boundingRect(
+            with: NSSize(width: bounds.width - 48, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).size
         let rect = NSRect(
             x: (bounds.width - size.width) / 2,
             y: (bounds.height - size.height) / 2,

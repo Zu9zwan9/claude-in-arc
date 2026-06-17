@@ -8,6 +8,9 @@ import SwiftUI
 public final class NotchPillController: ObservableObject {
     @Published public private(set) var isExpanded = false
     @Published public var statusText = "Claude"
+    @Published public private(set) var pageTitle = ""
+    @Published public private(set) var pageURL = ""
+    @Published public private(set) var pageTabId: Int?
 
     private var notch: DynamicNotch<
         NotchExpandedView,
@@ -57,6 +60,19 @@ public final class NotchPillController: ObservableObject {
             isExpanded = false
         }
     }
+
+    public func updatePageContext(title: String, url: String, tabId: Int?) {
+        pageTitle = title
+        pageURL = url
+        pageTabId = tabId
+        if !title.isEmpty {
+            statusText = title.count > 40 ? String(title.prefix(37)) + "…" : title
+        } else if !url.isEmpty {
+            statusText = url
+        } else {
+            statusText = "Claude"
+        }
+    }
 }
 
 private struct NotchCompactLeadingView: View {
@@ -86,10 +102,27 @@ private struct NotchExpandedView: View {
                 Text("Claude in Arc")
                     .font(.system(size: 13, weight: .semibold))
             }
-            Text(model.statusText)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            if !model.pageTitle.isEmpty {
+                Text(model.pageTitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(2)
+            }
+            if !model.pageURL.isEmpty {
+                Text(model.pageURL)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if !model.statusText.isEmpty && model.statusText != "Claude" {
+                Text(model.statusText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            if let tabId = model.pageTabId {
+                Text("tab \(tabId)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
             Text("Chat bridge (M3)")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
