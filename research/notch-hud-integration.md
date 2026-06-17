@@ -212,7 +212,7 @@ HUD pill subtitle updates; expanded chat receives same `tabId` as split mode.
 | **M0** | Schema, SPM scaffold, `hud-message-v1.json`, CLI `claude-in-arc hud build` | 1–2 days | **Done (scaffold)** |
 | **M1** | DynamicNotchKit pill + menu bar app; placeholder expanded `NSPanel` | 3–5 days | **Done** — `NotchPillController`, `HUDPanelController` |
 | **M2** | `connectNative` in shim; host ↔ app IPC; `hud install`; `panel-mode hud` | 1–2 weeks | **Done** — native messaging + `panel-mode hud` |
-| **M3** | WKWebView chat via bridge page; page context; ⌘E routes to HUD | 2–3 weeks | **Done (v1.2.25)** — `claude-arc-hud-bridge.html`, `claude-in-arc-ext://` scheme + chrome polyfill |
+| **M3** | WKWebView chat via bridge page; page context; ⌘E routes to HUD | 2–3 weeks | **Done (v1.2.26)** — `claude-arc-hud-bridge.html`, `claude-in-arc-ext://` scheme + chrome polyfill |
 | **M4** | Multi-display, signing/notarization, `doctor` HUD checks, polish | 1–2 weeks | — |
 
 **Total Phase 2:** ~6–10 weeks part-time after M1 dogfood.
@@ -244,6 +244,56 @@ claude-in-arc hud open                   # menu-bar app + collapsed pill
 # arc://extensions → Reload Claude in Arc
 # Browse in Arc, press ⌘E — HUD panel expands with Claude chat + page context (tabId)
 ```
+
+---
+
+## Troubleshooting (blank HUD panel)
+
+### Symptoms
+
+- ⌘E does nothing, or a floating panel opens but stays **empty / dark**
+- Notch pill may expand but chat panel is blank
+
+### Quick checklist
+
+```bash
+claude-in-arc install --panel-mode hud   # rebuild extension with HUD assets + mode
+claude-in-arc hud build
+claude-in-arc hud install                # registers host + launches menu-bar app (v1.2.26+)
+# arc://extensions → Reload Claude in Arc
+```
+
+Confirm **panel mode** is `hud`: extension service worker console should log `[claude-in-arc] hud connected native host com.claudeinarac.hud` on first ⌘E.
+
+### Console.app filters
+
+| Process / subsystem | What to look for |
+|---------------------|------------------|
+| `ClaudeInArcHUD` | `extension root=…`, `loadBridge url=…`, `scheme 200 path=sidepanel.html` |
+| `ClaudeInArcHUD` | `scheme 404` → extension not built/installed or wrong path |
+| `ClaudeInArcHUD` | `chrome polyfill missing` → run `claude-in-arc install` |
+| `ClaudeInArcHUDHost` | `launched ClaudeInArcHUD` on first toggle (auto-start) |
+| `ClaudeInArcHUDHost` | `ClaudeInArcHUD not found` → run `claude-in-arc hud build` |
+
+### arc://extensions service worker
+
+Open **Inspect views: service worker** for Claude in Arc. On ⌘E you should see:
+
+```
+[claude-in-arc] hud openPanelInHud tabId=… reason=commands.onCommand
+[claude-in-arc] hud postMessage type=toggle_hud
+[claude-in-arc] hud postMessage type=page_context
+```
+
+If you see `connectNative unavailable` or `HUD postMessage failed`, run `claude-in-arc hud install` and Reload.
+
+If `toggle_hud` posts but no panel: ensure `ClaudeInArcHUD` is running (menu-bar **Claude** icon). v1.2.26+ auto-launches it from the native host.
+
+### Common root causes (fixed in v1.2.26)
+
+1. **Menu-bar app not running** — host only spoke to Chrome; toggle notifications were dropped. Host now auto-launches `ClaudeInArcHUD` sibling binary.
+2. **`hudChrome` WKScriptMessageHandler registered after `WKWebView` init** — chrome polyfill could not proxy `storage.*` / `runtime.sendMessage`; sidepanel rendered blank. Handler is now registered on `WKWebViewConfiguration` before WebView creation.
+3. **Extension build missing bridge assets** — `ExtensionRootResolver` requires `claude-arc-hud-bridge.html` in the patched build directory. Re-run `claude-in-arc install --panel-mode hud`.
 
 ---
 

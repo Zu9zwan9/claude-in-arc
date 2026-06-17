@@ -11,9 +11,15 @@ public enum ExtensionRootResolver {
 
     public static func resolve() -> URL? {
         if let patched = validExtensionRoot(patchedBuildPath) {
+            NSLog("[ClaudeInArcHUD] extension root (patched build): %@", patched.path)
             return patched
         }
-        return newestArcExtensionRoot()
+        if let arc = newestArcExtensionRoot() {
+            NSLog("[ClaudeInArcHUD] extension root (Arc profile): %@", arc.path)
+            return arc
+        }
+        NSLog("[ClaudeInArcHUD] extension root not found")
+        return nil
     }
 
     private static func validExtensionRoot(_ url: URL) -> URL? {

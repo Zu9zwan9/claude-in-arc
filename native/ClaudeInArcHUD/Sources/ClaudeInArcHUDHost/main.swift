@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Chrome native-messaging host for Claude-in-Arc HUD.
@@ -119,6 +120,48 @@ fileprivate func forwardToApp(_ decoded: InboundMessage) {
     )
 }
 
+fileprivate func hudAppBinaryURL() -> URL {
+    URL(fileURLWithPath: CommandLine.arguments[0])
+        .resolvingSymlinksInPath()
+        .deletingLastPathComponent()
+        .appendingPathComponent("ClaudeInArcHUD")
+}
+
+fileprivate func isHudAppRunning() -> Bool {
+    NSWorkspace.shared.runningApplications.contains { app in
+        app.executableURL?.lastPathComponent == "ClaudeInArcHUD"
+    }
+}
+
+/// Launch the menu-bar HUD app if needed. Returns true when a new process was started.
+@discardableResult
+fileprivate func launchHudAppIfNeeded() -> Bool {
+    if isHudAppRunning() { return false }
+    let appURL = hudAppBinaryURL()
+    guard FileManager.default.isExecutableFile(atPath: appURL.path) else {
+        stderr.write(Data("[ClaudeInArcHUDHost] ClaudeInArcHUD not found at \(appURL.path)\n".utf8))
+        return false
+    }
+    let proc = Process()
+    proc.executableURL = appURL
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do {
+        try proc.run()
+        stderr.write(Data("[ClaudeInArcHUDHost] launched ClaudeInArcHUD\n".utf8))
+        return true
+    } catch {
+        stderr.write(Data("[ClaudeInArcHUDHost] failed to launch ClaudeInArcHUD: \(error)\n".utf8))
+        return false
+    }
+}
+
+fileprivate func ensureHudAppReady() {
+    if launchHudAppIfNeeded() {
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+}
+
 fileprivate func forwardProxyResponse(_ decoded: InboundMessage) {
     guard let requestId = decoded.requestId else { return }
     var info: [String: Any] = ["requestId": requestId]
@@ -177,9 +220,11 @@ while let data = readMessage(from: stdin) {
     case "ping":
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "toggle_hud":
+        ensureHudAppReady()
         if let decoded { forwardToApp(decoded) }
         writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
     case "set_collapsed":
+        ensureHudAppReady()
         if let decoded { forwardToApp(decoded) }
         let collapsed = decoded?.collapsed ?? true
         writeMessage(
@@ -187,11 +232,13 @@ while let data = readMessage(from: stdin) {
             to: stdout
         )
     case "page_context":
+        ensureHudAppReady()
         if let decoded { forwardToApp(decoded) }
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "hud_chrome_response":
         if let decoded { forwardProxyResponse(decoded) }
     case "sidebar_state":
+        ensureHudAppReady()
         if let decoded {
             if decoded.visible == false {
                 forwardToApp(InboundMessage(type: "set_collapsed", collapsed: true))

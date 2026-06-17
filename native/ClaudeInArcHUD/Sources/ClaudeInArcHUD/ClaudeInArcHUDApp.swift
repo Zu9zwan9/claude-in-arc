@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let info = notification.userInfo,
               let type = info[HudMessageBus.Key.type] as? String else { return }
 
+        NSLog("[ClaudeInArcHUD] message type=%@", type)
+
         switch type {
         case "toggle_hud":
             toggleHUD()
@@ -77,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func toggleHUD() {
+        NSLog("[ClaudeInArcHUD] toggleHUD visible=%@", panel.isVisible ? "yes" : "no")
         if panel.isVisible {
             panel.hide()
             pill.showCollapsed()

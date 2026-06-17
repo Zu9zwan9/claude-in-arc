@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.25";
+  var SHIM_VERSION = "1.2.26";
 
   function log() {
     try {
@@ -55,6 +55,14 @@
       var args = Array.prototype.slice.call(arguments);
       args.unshift(LOG_PREFIX);
       console.warn.apply(console, args);
+    } catch (_e) { /* no-op */ }
+  }
+
+  function splitDebug() {
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      args.unshift(LOG_PREFIX + " hud");
+      console.log.apply(console, args);
     } catch (_e) { /* no-op */ }
   }
 
@@ -434,12 +442,12 @@
         if (err) {
           warn("HUD native port disconnected:", err.message || String(err));
         } else {
-          log("HUD native port disconnected");
+          splitDebug("native port disconnected");
         }
         hudPort = null;
         hudReady = false;
       });
-      log("connected native HUD host " + HUD_HOST_NAME);
+      splitDebug("connected native host " + HUD_HOST_NAME);
       return hudPort;
     } catch (e) {
       warn("connectNative(" + HUD_HOST_NAME + ") failed:", e && e.message ? e.message : String(e));
@@ -453,6 +461,7 @@
     if (!port) return false;
     try {
       port.postMessage(payload);
+      splitDebug("postMessage type=" + (payload && payload.type ? payload.type : "?"));
       return true;
     } catch (e) {
       warn("HUD postMessage failed:", e && e.message ? e.message : String(e));
@@ -498,12 +507,15 @@
     switch (msg.type) {
       case "hud_ready":
         hudReady = true;
+        splitDebug("host ready — pushing page context");
         pushActivePageContext();
         break;
       case "request_page_context":
+        splitDebug("host requested page context");
         pushActivePageContext();
         break;
       case "hud_chrome_call":
+        splitDebug("chrome proxy method=" + (msg.method || "?") + " id=" + (msg.requestId || "?"));
         handleHudChromeCall(msg);
         break;
       case "hud_expanded":
@@ -649,7 +661,7 @@
 
   function openPanelInHud(tabId, reason) {
     tabId = normalizeTabId(tabId);
-    log(
+    splitDebug(
       "openPanelInHud tabId=" +
         tabId +
         " reason=" +

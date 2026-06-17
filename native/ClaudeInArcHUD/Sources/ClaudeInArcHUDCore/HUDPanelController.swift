@@ -49,6 +49,11 @@ public final class HUDPanelController: NSObject {
         if extensionRoot == nil {
             extensionRoot = ExtensionRootResolver.resolve()
         }
+        if let root = extensionRoot {
+            NSLog("[ClaudeInArcHUD] extension root=%@", root.path)
+        } else {
+            NSLog("[ClaudeInArcHUD] extension root not found")
+        }
 
         if let panel, let webView {
             positionBelowMenuBar(panel)
@@ -76,15 +81,19 @@ public final class HUDPanelController: NSObject {
                 forMainFrameOnly: false
             )
             config.userContentController.addUserScript(script)
+            NSLog("[ClaudeInArcHUD] injected chrome polyfill from %@", polyfillPath.path)
+        } else {
+            NSLog("[ClaudeInArcHUD] chrome polyfill missing at %@", polyfillPath.path)
         }
 
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
-        self.webView = webView
-
-        let bridge = HudChromeBridge(webView: webView)
+        // Register script message handler before WKWebView init — config is copied at creation.
+        let bridge = HudChromeBridge()
         chromeBridge = bridge
         config.userContentController.add(bridge, name: "hudChrome")
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        bridge.attach(webView: webView)
+        self.webView = webView
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.defaultWidth, height: Self.defaultHeight),
@@ -129,13 +138,20 @@ public final class HUDPanelController: NSObject {
     }
 
     private func loadBridge() {
-        guard let webView else { return }
+        guard let webView else {
+            NSLog("[ClaudeInArcHUD] loadBridge skipped — no webView")
+            return
+        }
         var path = "claude-arc-hud-bridge.html"
         if let tabId = pageTabId {
             path += "?tabId=\(tabId)"
         }
         let urlString = "\(Self.bridgeScheme)://localhost/\(path)"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else {
+            NSLog("[ClaudeInArcHUD] loadBridge invalid url=%@", urlString)
+            return
+        }
+        NSLog("[ClaudeInArcHUD] loadBridge url=%@ tabId=%@", urlString, pageTabId.map(String.init) ?? "nil")
         webView.load(URLRequest(url: url))
     }
 

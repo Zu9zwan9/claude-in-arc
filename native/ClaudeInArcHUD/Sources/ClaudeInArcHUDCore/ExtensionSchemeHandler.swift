@@ -30,6 +30,7 @@ public final class ExtensionSchemeHandler: NSObject, WKURLSchemeHandler {
             }
 
             guard !resourcePath.isEmpty, !resourcePath.contains("..") else {
+                NSLog("[ClaudeInArcHUD] scheme rejected path=%@", resourcePath)
                 self.finish(taskId, urlSchemeTask) { $0.didFailWithError(URLError(.fileDoesNotExist)) }
                 return
             }
@@ -38,11 +39,13 @@ public final class ExtensionSchemeHandler: NSObject, WKURLSchemeHandler {
             guard fileURL.path.hasPrefix(extRoot.path),
                   FileManager.default.fileExists(atPath: fileURL.path),
                   let data = try? Data(contentsOf: fileURL) else {
+                NSLog("[ClaudeInArcHUD] scheme 404 path=%@ root=%@", resourcePath, extRoot.path)
                 self.finish(taskId, urlSchemeTask) { $0.didFailWithError(URLError(.fileDoesNotExist)) }
                 return
             }
 
             let mime = Self.mimeType(for: resourcePath)
+            NSLog("[ClaudeInArcHUD] scheme 200 path=%@ bytes=%d", resourcePath, data.count)
             guard let response = HTTPURLResponse(
                 url: requestURL,
                 statusCode: 200,

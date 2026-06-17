@@ -18,7 +18,7 @@ public final class HudChromeBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private var observer: NSObjectProtocol?
 
-    public init(webView: WKWebView) {
+    public init(webView: WKWebView? = nil) {
         self.webView = webView
         super.init()
         observer = DistributedNotificationCenter.default().addObserver(
@@ -38,6 +38,10 @@ public final class HudChromeBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    public func attach(webView: WKWebView) {
+        self.webView = webView
+    }
+
     public func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
@@ -48,6 +52,7 @@ public final class HudChromeBridge: NSObject, WKScriptMessageHandler {
               let method = body[ProxyKey.method] as? String else { return }
 
         let args = body[ProxyKey.args] as? [Any] ?? []
+        NSLog("[ClaudeInArcHUD] hudChrome proxy request method=%@ id=%@", method, requestId)
         let info: [String: Any] = [
             ProxyKey.requestId: requestId,
             ProxyKey.method: method,

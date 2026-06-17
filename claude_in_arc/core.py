@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.25"
+TOOL_VERSION = "1.2.26"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -2004,7 +2004,10 @@ def cmd_hud(args: argparse.Namespace) -> int:
             ok("Registered HUD host in Arc.")
             detail(str(result.target))
             detail(str(result.binary))
-            detail("Run: claude-in-arc hud open  (menu-bar app must be running)")
+            if open_hud_app(release=args.release):
+                ok("Launched menu-bar HUD app.")
+            else:
+                detail("Run: claude-in-arc hud open  (menu-bar app must be running)")
             detail("Then: claude-in-arc config --panel-mode hud  and Reload arc://extensions")
         elif result.status == "already":
             ok("HUD host already registered.")
