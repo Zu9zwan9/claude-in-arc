@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.2"
+TOOL_VERSION = "1.2.3"
 
 # Product identity (cohesive voice across CLI + docs).
 PRODUCT_NAME = "Claude in Arc"

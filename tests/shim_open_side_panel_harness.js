@@ -54,7 +54,14 @@ function assert(cond, msg) {
 function makeChrome(opts) {
   opts = opts || {};
   const sessionStore = {};
-  const calls = { windowsCreate: [], windowsUpdate: [], tabsUpdate: [] };
+  const calls = {
+    windowsCreate: [],
+    windowsUpdate: [],
+    tabsUpdate: [],
+    setPopup: [],
+    onClickedListeners: [],
+    commandListeners: [],
+  };
   const wins = {};
   let nextWinId = 100;
 
@@ -117,10 +124,22 @@ function makeChrome(opts) {
       onUpdated: { addListener() {} },
     },
     action: {
-      setPopup(_opts, cb) {
+      setPopup(opts, cb) {
+        calls.setPopup.push(opts);
         if (cb) cb();
       },
-      onClicked: { addListener() {} },
+      onClicked: {
+        addListener(fn) {
+          calls.onClickedListeners.push(fn);
+        },
+      },
+    },
+    commands: {
+      onCommand: {
+        addListener(fn) {
+          calls.commandListeners.push(fn);
+        },
+      },
     },
   };
 
@@ -231,26 +250,42 @@ async function main() {
     assert(retargeted, "reused popup must be re-targeted to the new tab's panel URL");
   }
 
-  // --- Scenario 3: nativeSidePanelWorks rejects plain-JS Arc stubs ------------
+  // --- Scenario 3: nativeSidePanelWorks requires BOTH native bindings ----------
   {
     function fnSource(fn) {
       return Function.prototype.toString.call(fn);
     }
+    function isNativeBinding(fn) {
+      return typeof fn === "function" && fnSource(fn).indexOf("[native code]") !== -1;
+    }
     function nativeSidePanelWorks(sp) {
       if (!sp) return false;
-      if (typeof sp.open !== "function" || typeof sp.setOptions !== "function") return false;
-      var openPlain = fnSource(sp.open).indexOf("[native code]") === -1;
-      var setPlain = fnSource(sp.setOptions).indexOf("[native code]") === -1;
-      if (openPlain && setPlain) return false;
-      return true;
+      return isNativeBinding(sp.open) && isNativeBinding(sp.setOptions);
     }
     assert(
       !nativeSidePanelWorks({ open: function open() {}, setOptions: function setOptions() {} }),
       "plain JS sidePanel stub must not be treated as native Chrome"
     );
+    assert(!nativeSidePanelWorks({}), "empty sidePanel object must not be treated as native Chrome");
     assert(
-      !nativeSidePanelWorks({}),
-      "empty sidePanel object must not be treated as native Chrome"
+      !nativeSidePanelWorks({
+        open: function nativeOpen() {
+          return "[native code]";
+        },
+        setOptions: function setOptions() {},
+      }),
+      "partial native-looking stub must not be treated as native Chrome"
+    );
+    assert(
+      nativeSidePanelWorks({
+        open: function nativeOpen() {
+          return "[native code]";
+        },
+        setOptions: function nativeSet() {
+          return "[native code]";
+        },
+      }),
+      "both native-looking bindings should be treated as native Chrome"
     );
   }
 
@@ -274,6 +309,34 @@ async function main() {
     env.chrome.sidePanel = {};
     const sp = loadShim(env.chrome);
     assert(sp && sp.__claudeInArcShim === true, "empty sidePanel object must be replaced");
+  }
+
+  // --- Scenario 6: shim clears setPopup and wires toolbar handlers ------------
+  {
+    const env = makeChrome();
+    loadShim(env.chrome);
+    const cleared = env.calls.setPopup.some((o) => o && o.popup === "");
+    assert(cleared, "shim must clear action.setPopup so onClicked can fire");
+    const setTabPopup = env.calls.setPopup.some(
+      (o) => o && o.tabId != null && o.popup && o.popup.length > 0
+    );
+    assert(!setTabPopup, "shim must NOT set per-tab action popups (blocks onClicked)");
+    assert(env.calls.onClickedListeners.length >= 1, "shim must wire action.onClicked");
+    assert(env.calls.commandListeners.length >= 1, "shim must wire commands.onCommand");
+  }
+
+  // --- Scenario 7: Cmd+E command opens panel ----------------------------------
+  {
+    const env = makeChrome();
+    loadShim(env.chrome);
+    assert(env.calls.commandListeners.length >= 1, "command listener missing");
+    env.calls.commandListeners[0]("toggle-side-panel");
+    await new Promise((r) => setTimeout(r, 0));
+    assert(env.calls.windowsCreate.length === 1, "toggle-side-panel must open popup");
+    assert(
+      env.calls.windowsCreate[0].opts.url.indexOf("tabId=4242") !== -1,
+      "toggle-side-panel must target active tab"
+    );
   }
 
   console.log("OK: open_side_panel path produces popup-window behavior via the shim");

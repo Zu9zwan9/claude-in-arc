@@ -38,6 +38,24 @@
 (function () {
   "use strict";
 
+  var LOG_PREFIX = "[claude-in-arc]";
+
+  function log() {
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      args.unshift(LOG_PREFIX);
+      console.log.apply(console, args);
+    } catch (_e) { /* no-op */ }
+  }
+
+  function warn() {
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      args.unshift(LOG_PREFIX);
+      console.warn.apply(console, args);
+    } catch (_e) { /* no-op */ }
+  }
+
   // Bail out quietly if we are not in an extension context.
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
     return;
@@ -63,29 +81,29 @@
     }
   }
 
+  function isNativeBinding(fn) {
+    return typeof fn === "function" && fnSource(fn).indexOf("[native code]") !== -1;
+  }
+
   function nativeSidePanelWorks(sp) {
     if (!sp || isOurShim(sp)) return false;
-    if (typeof sp.open !== "function" || typeof sp.setOptions !== "function") {
-      return false;
-    }
-    var openSrc = fnSource(sp.open);
-    var setSrc = fnSource(sp.setOptions);
-    var openPlain = openSrc.indexOf("[native code]") === -1;
-    var setPlain = setSrc.indexOf("[native code]") === -1;
-    // Arc ships plain-JS stub methods; real Chrome exposes [native code] bindings.
-    if (openPlain && setPlain) return false;
-    return true;
+    // Both core methods must exist AND be real Chromium bindings. Arc may ship
+    // one native-looking stub while the other is plain JS, or native no-ops.
+    return isNativeBinding(sp.open) && isNativeBinding(sp.setOptions);
   }
 
   if (nativeSidePanelWorks(chrome.sidePanel)) {
     return;
   }
 
+  log("installing sidePanel polyfill (Arc / broken stub detected)");
+
   var PANEL_WINDOW_KEY = "claudeInArc.panelWindowId";
   var PANEL_TAB_KEY = "claudeInArc.panelTabId";
   var DEFAULT_PATH = "sidepanel.html";
   var POPUP_WIDTH = 480;
   var POPUP_HEIGHT = 840;
+  var TOGGLE_COMMAND = "toggle-side-panel";
 
   // Per-tab options set by the extension via setOptions().
   var optionsByTab = new Map();
@@ -184,9 +202,51 @@
     });
   }
 
+  function createPanelWindow(url, windowType, resolve) {
+    try {
+      chrome.windows.create(
+        {
+          url: url,
+          type: windowType,
+          width: POPUP_WIDTH,
+          height: POPUP_HEIGHT,
+          focused: true,
+        },
+        function (win) {
+          var err = chrome.runtime.lastError;
+          if (err) {
+            warn("windows.create type=" + windowType + " failed:", err.message || String(err));
+          }
+          if (win && win.id != null) {
+            log("opened panel window id=" + win.id + " type=" + windowType);
+            var firstTab = win.tabs && win.tabs[0] ? win.tabs[0].id : null;
+            var toStore = {};
+            toStore[PANEL_WINDOW_KEY] = win.id;
+            toStore[PANEL_TAB_KEY] = firstTab;
+            sessionSet(toStore).then(resolve, resolve);
+          } else if (windowType === "popup") {
+            log("popup window failed; retrying as type=normal");
+            createPanelWindow(url, "normal", resolve);
+          } else {
+            warn("could not create panel window");
+            resolve();
+          }
+        }
+      );
+    } catch (e) {
+      warn("windows.create threw:", e && e.message ? e.message : String(e));
+      if (windowType === "popup") {
+        createPanelWindow(url, "normal", resolve);
+      } else {
+        resolve();
+      }
+    }
+  }
+
   async function openOrFocusPanel(tabId) {
     var path = resolvePath(tabId);
     var url = chrome.runtime.getURL(path);
+    log("opening popup for tabId=" + tabId + " url=" + path);
 
     var stored = await sessionGet([PANEL_WINDOW_KEY, PANEL_TAB_KEY]);
     var existingWindowId = stored[PANEL_WINDOW_KEY];
@@ -209,6 +269,7 @@
           chrome.windows.update(existingWindowId, { focused: true, drawAttention: true }, function () {
             void chrome.runtime.lastError;
           });
+          log("focused existing panel window id=" + existingWindowId);
           return;
         } catch (_e) {
           // fall through to recreate
@@ -219,31 +280,7 @@
     }
 
     await new Promise(function (resolve) {
-      try {
-        chrome.windows.create(
-          {
-            url: url,
-            type: "popup",
-            width: POPUP_WIDTH,
-            height: POPUP_HEIGHT,
-            focused: true,
-          },
-          function (win) {
-            void chrome.runtime.lastError;
-            if (win && win.id != null) {
-              var firstTab = win.tabs && win.tabs[0] ? win.tabs[0].id : null;
-              var toStore = {};
-              toStore[PANEL_WINDOW_KEY] = win.id;
-              toStore[PANEL_TAB_KEY] = firstTab;
-              sessionSet(toStore).then(resolve, resolve);
-            } else {
-              resolve();
-            }
-          }
-        );
-      } catch (_e) {
-        resolve();
-      }
+      createPanelWindow(url, "popup", resolve);
     });
   }
 
@@ -272,53 +309,51 @@
     return Promise.resolve(value);
   }
 
-  // Arc often swallows chrome.action.onClicked for extensions with the sidePanel
-  // permission. Point the toolbar action at sidepanel.html (with ?tabId=) so a
-  // click opens the panel even when onClicked never fires.
-  function wireActionPopupFallback() {
-    if (!(chrome.action && chrome.action.setPopup && chrome.tabs)) return;
-
-    function setPopupForTab(tabId) {
-      if (tabId == null) return;
-      var path = resolvePath(tabId);
-      try {
-        chrome.action.setPopup({ tabId: tabId, popup: path });
-      } catch (_e) { /* no-op */ }
-    }
-
-    function syncActiveTabPopup() {
-      try {
-        chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
-          void chrome.runtime.lastError;
-          var t = tabs && tabs[0];
-          if (t && t.id != null) setPopupForTab(t.id);
-        });
-      } catch (_e) { /* no-op */ }
-    }
-
-    syncActiveTabPopup();
-
-    try {
-      if (chrome.tabs.onActivated) {
-        chrome.tabs.onActivated.addListener(function (info) {
-          setPopupForTab(info.tabId);
-        });
-      }
-      if (chrome.tabs.onUpdated) {
-        chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
-          if (changeInfo.status === "complete") syncActiveTabPopup();
-        });
-      }
-    } catch (_e) { /* no-op */ }
-  }
-
   var panelBehavior = { openPanelOnActionClick: false };
   var actionClickWired = false;
 
   function onActionClickOpenPanel(tab) {
     var tabId = tab && tab.id;
     if (tabId == null) return;
+    log("action.onClicked tabId=" + tabId);
     openOrFocusPanel(tabId).catch(function (_e) { /* no-op */ });
+  }
+
+  // The upstream worker registers chrome.action.onClicked itself. Setting
+  // action.setPopup to a non-empty path PREVENTS onClicked from firing, and Arc
+  // often does not show action popups anyway — so we must keep popup cleared.
+  function wireToolbarOpenHandlers() {
+    if (chrome.action && chrome.action.setPopup) {
+      try {
+        chrome.action.setPopup({ popup: "" }, function () {
+          void chrome.runtime.lastError;
+        });
+        log("cleared action.setPopup so onClicked can fire");
+      } catch (_e) { /* no-op */ }
+    }
+
+    if (!actionClickWired && chrome.action && chrome.action.onClicked) {
+      actionClickWired = true;
+      chrome.action.onClicked.addListener(onActionClickOpenPanel);
+      log("wired action.onClicked handler");
+    }
+
+    if (chrome.commands && chrome.commands.onCommand) {
+      chrome.commands.onCommand.addListener(function (command) {
+        if (command !== TOGGLE_COMMAND) return;
+        log("commands.onCommand " + command);
+        try {
+          chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+            void chrome.runtime.lastError;
+            var t = tabs && tabs[0];
+            if (t && t.id != null) {
+              openOrFocusPanel(t.id).catch(function (_e) { /* no-op */ });
+            }
+          });
+        } catch (_e) { /* no-op */ }
+      });
+      log("wired commands.onCommand for " + TOGGLE_COMMAND);
+    }
   }
 
   var sidePanelPolyfill = {
@@ -347,14 +382,8 @@
       try {
         if (behavior && typeof behavior.openPanelOnActionClick === "boolean") {
           panelBehavior.openPanelOnActionClick = behavior.openPanelOnActionClick;
-          if (
-            behavior.openPanelOnActionClick &&
-            !actionClickWired &&
-            chrome.action &&
-            chrome.action.onClicked
-          ) {
-            actionClickWired = true;
-            chrome.action.onClicked.addListener(onActionClickOpenPanel);
+          if (behavior.openPanelOnActionClick && !actionClickWired) {
+            wireToolbarOpenHandlers();
           }
         }
       } catch (_e) { /* no-op */ }
@@ -373,6 +402,7 @@
         if (tabId == null) {
           tabId = await resolveActiveTabId();
         }
+        log("sidePanel.open tabId=" + tabId);
         await openOrFocusPanel(tabId);
       })();
       run.catch(function (_e) { /* never throw */ });
@@ -381,16 +411,53 @@
     },
   };
 
-  try {
-    Object.defineProperty(chrome, "sidePanel", {
-      value: sidePanelPolyfill,
-      writable: false,
-      configurable: true,
-      enumerable: true,
-    });
-  } catch (_e) {
-    try { chrome.sidePanel = sidePanelPolyfill; } catch (_e2) { /* no-op */ }
+  function patchSidePanelMethods(target) {
+    var names = ["setOptions", "getOptions", "open", "setPanelBehavior", "getPanelBehavior"];
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      try {
+        target[name] = sidePanelPolyfill[name];
+      } catch (_e) { /* no-op */ }
+    }
+    try {
+      target.__claudeInArcShim = true;
+    } catch (_e2) { /* no-op */ }
   }
 
-  wireActionPopupFallback();
+  function installSidePanelPolyfill() {
+    var installed = false;
+    try {
+      Object.defineProperty(chrome, "sidePanel", {
+        value: sidePanelPolyfill,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+      installed = chrome.sidePanel === sidePanelPolyfill;
+    } catch (_e) {
+      /* fall through */
+    }
+    if (!installed) {
+      try {
+        chrome.sidePanel = sidePanelPolyfill;
+        installed = chrome.sidePanel === sidePanelPolyfill;
+      } catch (_e2) {
+        /* fall through */
+      }
+    }
+    if (!installed && chrome.sidePanel && !isOurShim(chrome.sidePanel)) {
+      warn("chrome.sidePanel not replaceable; patching methods in place");
+      patchSidePanelMethods(chrome.sidePanel);
+      installed = isOurShim(chrome.sidePanel);
+    }
+    if (installed) {
+      log("sidePanel polyfill active");
+    } else {
+      warn("failed to install sidePanel polyfill");
+    }
+    return installed;
+  }
+
+  installSidePanelPolyfill();
+  wireToolbarOpenHandlers();
 })();
