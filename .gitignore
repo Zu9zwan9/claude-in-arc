@@ -7,3 +7,5 @@ dist/
 *.egg-info/
 *.log
 node_modules/
+native/**/.build/
+native/**/.DS_Store

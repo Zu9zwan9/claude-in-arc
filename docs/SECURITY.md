@@ -57,12 +57,19 @@ declares (e.g. `sidePanel`, `storage`, `activeTab`, `scripting`, `tabs`,
 permission. The only code we introduce is:
 
 - `claude-arc-shim.js` — a `chrome.sidePanel` polyfill that opens the panel as a
-  popup window using `chrome.windows.create` (no new permission required) and is
-  a **no‑op when the real `chrome.sidePanel` exists** (Chrome/Brave/Edge).
+  popup window or optional in-page sidebar (v1.2.9), using only APIs the
+  upstream extension already has. It is a **no‑op when the real
+  `chrome.sidePanel` exists** (Chrome/Brave/Edge).
+- `claude-arc-sidebar-bridge.html` / `claude-arc-sidebar-host.js` — in-page
+  sidebar overlay (opt-in via `claude-in-arc config --panel-mode sidebar`).
+  **Not** Anthropic's remote `wss://bridge.claudeusercontent.com` bridge used by
+  Claude Code `/chrome` — we do not add, modify, or block that upstream WebSocket.
 - `arc-sw-loader.js` — two `import` lines that load the shim, then the original
   service worker, unchanged.
 - one `<script src="claude-arc-shim.js">` tag injected at the top of
   `options.html` and `sidepanel.html`.
+- `manifest.json` — `service_worker` repointed; adds the sidebar bridge to
+  `web_accessible_resources` (not a new permission).
 
 Because we keep the official `key`, the build has the **same id** as the Store
 extension, so the existing native‑messaging allow‑list stays valid (no widening
@@ -76,8 +83,9 @@ host unless you link it explicitly.
 # Inspect every change we made relative to the upstream extension:
 diff -ru "$(claude-in-arc doctor | … source path …)" \
          "~/Library/Application Support/ClaudeInArc/Claude-in-Arc-Extension"
-# You should see ONLY: claude-arc-shim.js (added), arc-sw-loader.js (added),
-# CLAUDE_IN_ARC_PATCH.json (added), manifest.json (service_worker repointed),
+# You should see ONLY: claude-arc-shim.js (added), sidebar bridge/host (added),
+# arc-sw-loader.js (added), CLAUDE_IN_ARC_PATCH.json (added),
+# manifest.json (service_worker repointed, web_accessible_resources for bridge),
 # options.html / sidepanel.html (one <script> tag added).
 ```
 

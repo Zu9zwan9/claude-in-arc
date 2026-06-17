@@ -40,7 +40,8 @@ context (demonstrated by the open‑source `claude-in-arc` project).
 
 ## What fails
 
-- The bridge WebSocket to `wss://bridge.claudeusercontent.com` is **established on Chrome** but **not on Arc**.
+- The bridge WebSocket to `wss://bridge.claudeusercontent.com` is **established on Chrome** but **fails on Arc** (and other non-Chrome Chromium browsers).
+- On Arc, DevTools may show `net::ERR_ADDRESS_INVALID` during the WebSocket handshake — a symptom of the gated remote bridge, not a `claude-in-arc` regression.
 - `bridgeDisplayName` is set on Chrome, missing on Arc.
 - Because the extension never appears on the bridge, Claude Code's `/chrome` MCP server cannot match it, and tool calls (`tabs_context_mcp`, etc.) fail or prompt to "set up in Chrome."
 

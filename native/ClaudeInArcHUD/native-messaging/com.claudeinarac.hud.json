@@ -1,0 +1,9 @@
+{
+  "name": "com.claudeinarac.hud",
+  "description": "Claude in Arc floating HUD native-messaging host (scaffold)",
+  "path": "HOST_BINARY_PATH",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/"
+  ]
+}

@@ -110,9 +110,58 @@ class PatchEngineTests(unittest.TestCase):
         ext = make_fixture(self.src_root)
         result = core.build_extension(self._source(ext), dry_run=False)
         self.assertTrue((result.build_dir / core.SHIM_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.SIDEBAR_BRIDGE_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.SIDEBAR_BRIDGE_JS_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.SIDEBAR_HOST_FILENAME).is_file())
         # Original loader and worker preserved untouched.
         self.assertTrue((result.build_dir / "service-worker-loader.js").is_file())
         self.assertTrue((result.build_dir / "assets" / "service-worker.js").is_file())
+
+    def test_sidebar_bridge_is_web_accessible(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(self._source(ext), dry_run=False)
+        manifest = json.loads((result.build_dir / "manifest.json").read_text())
+        war = manifest.get("web_accessible_resources") or []
+        resources: list[str] = []
+        for entry in war:
+            resources.extend(entry.get("resources") or [])
+        self.assertIn(core.SIDEBAR_BRIDGE_FILENAME, resources)
+
+    def test_sidebar_bridge_uses_external_script_not_inline(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(self._source(ext), dry_run=False)
+        bridge_html = (result.build_dir / core.SIDEBAR_BRIDGE_FILENAME).read_text()
+        bridge_js = (result.build_dir / core.SIDEBAR_BRIDGE_JS_FILENAME).read_text()
+        self.assertIn(
+            f'src="{core.SIDEBAR_BRIDGE_JS_FILENAME}"',
+            bridge_html,
+            "bridge must load external JS (MV3 CSP blocks inline scripts)",
+        )
+        self.assertNotIn("document.createElement", bridge_html)
+        self.assertIn("sidepanel.html", bridge_js)
+        self.assertIn("chrome.runtime.getURL", bridge_js)
+
+    def test_panel_mode_split_baked_into_shim(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(
+            self._source(ext), dry_run=False, panel_mode="split"
+        )
+        shim = (result.build_dir / core.SHIM_FILENAME).read_text()
+        self.assertIn('var DEFAULT_PANEL_MODE = "split";', shim)
+        self.assertEqual(result.panel_mode, "split")
+        split_host = result.build_dir / core.SPLIT_HOST_FILENAME
+        self.assertTrue(split_host.is_file(), "split host asset must be copied")
+
+    def test_panel_mode_sidebar_baked_into_shim(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(
+            self._source(ext), dry_run=False, panel_mode="sidebar"
+        )
+        shim = (result.build_dir / core.SHIM_FILENAME).read_text()
+        self.assertIn('var DEFAULT_PANEL_MODE = "sidebar";', shim)
+        self.assertEqual(result.panel_mode, "sidebar")
+        marker = json.loads((result.build_dir / core.PATCH_MARKER_FILENAME).read_text())
+        self.assertEqual(marker.get("panel_mode"), "sidebar")
 
     def test_pages_get_shim_injected_once(self):
         ext = make_fixture(self.src_root)
@@ -166,11 +215,57 @@ class PatchEngineTests(unittest.TestCase):
         core.build_extension(self._source(ext), dry_run=True)
         self.assertFalse(core.BUILD_EXTENSION_DIR.exists())
 
+    def test_shim_declares_arc_split_mode(self):
+        shim = core.SHIM_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("openPanelInSplit", shim)
+        self.assertIn("claude-arc-split-host", shim)
+        self.assertIn("claude-in-arc-split", shim)
+        split_host = core.SPLIT_HOST_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("claude-in-arc-split-open", split_host)
+
+    def test_shim_declares_split_timing_and_hint(self):
+        shim = core.SHIM_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("SPLIT_POPUP_DELAY_MS", shim)
+        self.assertIn("notifyArcSplitPanelHint", shim)
+        self.assertIn("applySplitMarginThenOpen", shim)
+
+    def test_shim_declares_arc_iframe_fallback(self):
+        shim = core.SHIM_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("isArcBrowser", shim)
+        self.assertIn("effectivePanelMode", shim)
+        self.assertIn("claude-in-arc-sidebar-iframe-blocked", shim)
+        host = core.SIDEBAR_HOST_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("blocked by arc", host.lower())
+
+    def test_shim_declares_split_gutter_alignment(self):
+        shim = core.SHIM_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("splitGutterBoundsFromAnchor", shim)
+        self.assertIn("resolveSplitAnchorForTab", shim)
+        self.assertIn("syncSplitPopupToGutter", shim)
+        self.assertIn("SPLIT_BOUNDS_RETRY_DELAYS_MS", shim)
+        self.assertIn("scheduleSplitBoundsRetries", shim)
+        self.assertIn("splitBoundsSyncInFlight", shim)
+        split_host = core.SPLIT_HOST_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("background:transparent", split_host)
+
+    def test_shim_declares_arc_split_default(self):
+        shim = core.SHIM_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("arcExplicitPopupMode", shim)
+        self.assertIn("isHttpsPageUrl", shim)
+        self.assertIn("forcePanelWindowBounds", shim)
+        self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
+
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.5")
+        self.assertEqual(core.shim_version_label(), "1.2.20")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))
+
+    def test_remote_bridge_constants_documented(self):
+        self.assertEqual(core.REMOTE_BRIDGE_WS_HOST, "bridge.claudeusercontent.com")
+        self.assertEqual(core.REMOTE_BRIDGE_FEATURE_FLAG, "chrome_ext_bridge_enabled")
+        src = Path(core.__file__).read_text(encoding="utf-8")
+        self.assertIn("ERR_ADDRESS_INVALID", src)
 
 
 class NativeMessagingTests(unittest.TestCase):

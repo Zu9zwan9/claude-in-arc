@@ -60,7 +60,12 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.5"
+TOOL_VERSION = "1.2.20"
+
+# Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
+# Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
+REMOTE_BRIDGE_WS_HOST = "bridge.claudeusercontent.com"
+REMOTE_BRIDGE_FEATURE_FLAG = "chrome_ext_bridge_enabled"
 
 # Product identity (cohesive voice across CLI + docs).
 PRODUCT_NAME = "Claude in Arc"
@@ -84,6 +89,11 @@ BACKUP_SUFFIX = ".claude-in-arc.bak"
 SHIM_FILENAME = "claude-arc-shim.js"
 PRELUDE_FILENAME = "arc-shim-prelude.js"
 SW_LOADER_FILENAME = "arc-sw-loader.js"
+SIDEBAR_BRIDGE_FILENAME = "claude-arc-sidebar-bridge.html"
+SIDEBAR_BRIDGE_JS_FILENAME = "claude-arc-sidebar-bridge.js"
+SIDEBAR_HOST_FILENAME = "claude-arc-sidebar-host.js"
+SPLIT_HOST_FILENAME = "claude-arc-split-host.js"
+PANEL_MODE_STATE_KEY = "panel_mode"
 
 # Extension HTML pages that may themselves call chrome.sidePanel and therefore
 # need the page-side shim injected.
@@ -92,6 +102,12 @@ PAGES_TO_PATCH = ["options.html", "sidepanel.html"]
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 SHIM_SOURCE = ASSETS_DIR / SHIM_FILENAME
 PRELUDE_SOURCE = ASSETS_DIR / PRELUDE_FILENAME
+SIDEBAR_BRIDGE_SOURCE = ASSETS_DIR / SIDEBAR_BRIDGE_FILENAME
+SIDEBAR_BRIDGE_JS_SOURCE = ASSETS_DIR / SIDEBAR_BRIDGE_JS_FILENAME
+SIDEBAR_HOST_SOURCE = ASSETS_DIR / SIDEBAR_HOST_FILENAME
+SPLIT_HOST_SOURCE = ASSETS_DIR / SPLIT_HOST_FILENAME
+
+VALID_PANEL_MODES = ("popup", "sidebar", "split")
 
 
 def shim_version_label() -> str:
@@ -593,6 +609,73 @@ def _inject_page_shim(html_path: Path) -> bool:
     return True
 
 
+def _apply_panel_mode_to_shim(shim_path: Path, panel_mode: str) -> None:
+    """Bake default panel mode into the copied shim (popup | sidebar | split)."""
+    if panel_mode not in VALID_PANEL_MODES:
+        raise CliError(
+            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, or split)"
+        )
+    text = shim_path.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r'var DEFAULT_PANEL_MODE = "(?:popup|sidebar|split)";',
+        f'var DEFAULT_PANEL_MODE = "{panel_mode}";',
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise CliError("Build failed: could not set DEFAULT_PANEL_MODE in shim.")
+    shim_path.write_text(updated, encoding="utf-8")
+
+
+def _patch_web_accessible_resources(manifest: Dict, resource: str) -> bool:
+    """Ensure an extension page can be embedded in a page iframe (no new permission)."""
+    war = manifest.get("web_accessible_resources")
+    if not war:
+        manifest["web_accessible_resources"] = [
+            {"resources": [resource], "matches": ["<all_urls>"]}
+        ]
+        return True
+
+    entries: List[Dict] = []
+    if isinstance(war, list):
+        entries = [e for e in war if isinstance(e, dict)]
+    elif isinstance(war, dict):
+        entries = [war]
+
+    for entry in entries:
+        resources = entry.get("resources") or []
+        if resource in resources:
+            return False
+        if "<all_urls>" in (entry.get("matches") or []) or entry.get("matches") == ["<all_urls>"]:
+            entry.setdefault("resources", [])
+            if resource not in entry["resources"]:
+                entry["resources"].append(resource)
+            manifest["web_accessible_resources"] = entries
+            return True
+
+    entries.append({"resources": [resource], "matches": ["<all_urls>"]})
+    manifest["web_accessible_resources"] = entries
+    return True
+
+
+def _panel_mode_from_state() -> str:
+    state = read_state()
+    if PANEL_MODE_STATE_KEY not in state:
+        return "split" if arc_installed() else "popup"
+    mode = state.get(PANEL_MODE_STATE_KEY, "popup")
+    if mode in VALID_PANEL_MODES:
+        return mode
+    return "split" if arc_installed() else "popup"
+
+
+def _default_panel_mode_for_install() -> str:
+    """First-time Arc installs default to split-panel mode."""
+    state = read_state()
+    if PANEL_MODE_STATE_KEY in state:
+        return _panel_mode_from_state()
+    return "split" if arc_installed() else "popup"
+
+
 @dataclass
 class BuildResult:
     source: SourceExtension
@@ -600,15 +683,34 @@ class BuildResult:
     extension_id_preserved: bool
     patched_pages: List[str] = field(default_factory=list)
     original_service_worker: str = ""
+    panel_mode: str = "popup"
 
 
 def build_extension(
-    source: SourceExtension, dry_run: bool = False, new_id: bool = False
+    source: SourceExtension,
+    dry_run: bool = False,
+    new_id: bool = False,
+    panel_mode: Optional[str] = None,
 ) -> BuildResult:
     if not SHIM_SOURCE.is_file():
         raise CliError(f"Internal error: shim asset missing at {SHIM_SOURCE}")
     if not PRELUDE_SOURCE.is_file():
         raise CliError(f"Internal error: prelude asset missing at {PRELUDE_SOURCE}")
+    if not SIDEBAR_BRIDGE_SOURCE.is_file():
+        raise CliError(f"Internal error: sidebar bridge asset missing at {SIDEBAR_BRIDGE_SOURCE}")
+    if not SIDEBAR_BRIDGE_JS_SOURCE.is_file():
+        raise CliError(f"Internal error: sidebar bridge script missing at {SIDEBAR_BRIDGE_JS_SOURCE}")
+    if not SIDEBAR_HOST_SOURCE.is_file():
+        raise CliError(f"Internal error: sidebar host asset missing at {SIDEBAR_HOST_SOURCE}")
+    if not SPLIT_HOST_SOURCE.is_file():
+        raise CliError(f"Internal error: split host asset missing at {SPLIT_HOST_SOURCE}")
+
+    if panel_mode is None:
+        panel_mode = _default_panel_mode_for_install()
+    if panel_mode not in VALID_PANEL_MODES:
+        raise CliError(
+            f"Invalid panel mode: {panel_mode!r} (expected popup, sidebar, or split)"
+        )
 
     manifest = _read_manifest(source.path)
 
@@ -628,6 +730,8 @@ def build_extension(
         info(f"[dry-run]   -> {BUILD_EXTENSION_DIR}")
         info(f"[dry-run] would wrap service worker '{original_sw}' with '{SW_LOADER_FILENAME}'")
         info(f"[dry-run] would inject page shim into: {', '.join(PAGES_TO_PATCH)}")
+        info(f"[dry-run] would add sidebar bridge + split/sidebar host assets")
+        info(f"[dry-run] default panel mode: {panel_mode}")
         info(f"[dry-run] extension id preserved via manifest key: {key_present}")
         if new_id:
             info("[dry-run] --new-id: would drop manifest key and rename to 'Claude (Arc)'")
@@ -637,6 +741,7 @@ def build_extension(
             extension_id_preserved=key_present,
             patched_pages=[],
             original_service_worker=original_sw,
+            panel_mode=panel_mode,
         )
 
     # Path-safety: only ever build inside our managed directory.
@@ -647,9 +752,14 @@ def build_extension(
     BUILD_EXTENSION_DIR.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source.path, BUILD_EXTENSION_DIR)
 
-    # 1) Drop the chrome.sidePanel polyfill and SW prelude at the extension root.
+    # 1) Drop the chrome.sidePanel polyfill, sidebar assets, and SW prelude at the root.
     shutil.copy2(SHIM_SOURCE, BUILD_EXTENSION_DIR / SHIM_FILENAME)
     shutil.copy2(PRELUDE_SOURCE, BUILD_EXTENSION_DIR / PRELUDE_FILENAME)
+    shutil.copy2(SIDEBAR_BRIDGE_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_BRIDGE_FILENAME)
+    shutil.copy2(SIDEBAR_BRIDGE_JS_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_BRIDGE_JS_FILENAME)
+    shutil.copy2(SIDEBAR_HOST_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_HOST_FILENAME)
+    shutil.copy2(SPLIT_HOST_SOURCE, BUILD_EXTENSION_DIR / SPLIT_HOST_FILENAME)
+    _apply_panel_mode_to_shim(BUILD_EXTENSION_DIR / SHIM_FILENAME, panel_mode)
 
     # 2) Create a module loader that runs the prelude + shim before the real worker.
     loader = (
@@ -672,6 +782,8 @@ def build_extension(
         if "(Arc)" not in base_name:
             manifest["name"] = f"{base_name} (Arc)"
 
+    _patch_web_accessible_resources(manifest, SIDEBAR_BRIDGE_FILENAME)
+
     (BUILD_EXTENSION_DIR / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -688,6 +800,7 @@ def build_extension(
         "tool_version": TOOL_VERSION,
         "shim_version": shim_version_label(),
         "shim_hash": shim_content_hash(),
+        "panel_mode": panel_mode,
         "source_browser": source.browser.name,
         "source_version": source.version,
         "extension_id_preserved": key_present,
@@ -706,6 +819,7 @@ def build_extension(
     state["build_dir"] = str(BUILD_EXTENSION_DIR)
     state["tool_version"] = TOOL_VERSION
     state["new_id"] = new_id
+    state[PANEL_MODE_STATE_KEY] = panel_mode
     write_state(state)
 
     return BuildResult(
@@ -714,6 +828,7 @@ def build_extension(
         extension_id_preserved=key_present,
         patched_pages=patched_pages,
         original_service_worker=original_sw,
+        panel_mode=panel_mode,
     )
 
 
@@ -729,6 +844,10 @@ def _validate_build(build_dir: Path) -> None:
         SW_LOADER_FILENAME,
         PRELUDE_FILENAME,
         SHIM_FILENAME,
+        SIDEBAR_BRIDGE_FILENAME,
+        SIDEBAR_BRIDGE_JS_FILENAME,
+        SIDEBAR_HOST_FILENAME,
+        SPLIT_HOST_FILENAME,
         manifest["background"].get("service_worker"),
     ):
         if not (build_dir / required).is_file():
@@ -1108,6 +1227,51 @@ def _print_conflict_fix(state: ArcExtensionState, *, include_detail: bool = True
         detail(str(BUILD_EXTENSION_DIR))
 
 
+def _arc_sidebar_unsupported_warning() -> None:
+    """Warn that Arc blocks extension iframes in page embeds."""
+    warn(
+        "Arc blocks extension pages inside page iframes — in-page sidebar mode\n"
+        "    does not work on Arc. Use split-panel mode (default) or popup."
+    )
+    detail("See docs/ARC_LIMITATIONS.md for details.")
+
+
+def _non_chrome_chromium_browsers() -> List[Browser]:
+    """Browsers where the side-panel patch applies (not Google Chrome itself)."""
+    return [b for b in installed_browsers() if b.needs_patch]
+
+
+def _print_remote_bridge_limitation(*, verbose: bool = False) -> None:
+    """Document Claude Code /chrome remote bridge — unavailable on non-Chrome Chromium."""
+    patched = _non_chrome_chromium_browsers()
+    if patched:
+        names = ", ".join(b.name for b in patched)
+        warn(
+            f"Claude Code '/chrome' browser automation is unavailable in {names}."
+        )
+    else:
+        info("Claude Code '/chrome' browser automation requires Google Chrome.")
+    detail(
+        f"The official extension opens a remote WebSocket to wss://{REMOTE_BRIDGE_WS_HOST}"
+    )
+    detail(
+        f"only when Anthropic's server-side flag ({REMOTE_BRIDGE_FEATURE_FLAG}) allows it."
+    )
+    detail("That flag evaluates false for non-Chrome Chromium browsers (Arc, Brave, …).")
+    detail("No local patch can change a server flag.")
+    if patched:
+        detail(
+            "In Arc you may see: WebSocket connection to "
+            f"'wss://{REMOTE_BRIDGE_WS_HOST}/chrome/…' failed: "
+            "net::ERR_ADDRESS_INVALID — expected; not caused by claude-in-arc."
+        )
+    if verbose:
+        detail("Side-panel chat with page context (this tool's goal) does not use that bridge.")
+        detail("For /chrome automation, use Google Chrome or upvote anthropics/claude-code#34364.")
+    else:
+        detail("Side-panel chat with page context — which this tool enables — is unaffected.")
+
+
 def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> None:
     heading("One step left")
     say("  Chromium asks you to load an unpacked extension yourself — a deliberate")
@@ -1142,8 +1306,31 @@ def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> 
         detail("(already revealed in Finder)")
 
     say("")
-    say(f"  Then open Claude with the toolbar icon or {Style.bold('⌘E')}. It appears as a")
-    say("  side window with full page context — exactly like Chrome.")
+    if build.panel_mode == "sidebar":
+        if arc_installed():
+            _arc_sidebar_unsupported_warning()
+            say("")
+        say(f"  Then open Claude with the toolbar icon or {Style.bold('⌘E')}. On Chrome/Brave,")
+        say("  it appears as an in-page sidebar on the right (resize or close with ×).")
+        say(f"  On Arc, the shim uses split-panel mode instead. Right-click the")
+        say("  extension icon to switch panel modes.")
+    elif build.panel_mode == "split":
+        say(f"  Then open Claude with the toolbar icon or {Style.bold('⌘E')}. On Arc,")
+        say("  the page narrows on the left and Claude docks on the right — integrated")
+        say("  split-panel mode (recommended). Right-click the icon to switch modes.")
+    else:
+        say(f"  Then open Claude with the toolbar icon or {Style.bold('⌘E')}. It appears as a")
+        say("  side window docked to the browser's right edge.")
+        say("")
+        if arc_installed():
+            say(
+                f"  Prefer integrated split-panel on Arc? Run "
+                f"{Style.cyan('claude-in-arc config --panel-mode split')}"
+            )
+            say("  then Reload the extension.")
+        else:
+            say(f"  Prefer an in-page sidebar on Chrome/Brave? Run {Style.cyan('claude-in-arc config --panel-mode sidebar')}")
+            say("  then Reload the extension.")
     say("")
     rule()
     say(f"  {Style.dim('Check status')}   claude-in-arc doctor")
@@ -1166,7 +1353,12 @@ def cmd_install(args: argparse.Namespace) -> int:
     if not getattr(args, "allow_unverified", False):
         ok("Verified it's genuine — its signing key matches Anthropic's published id.")
 
-    build = build_extension(source, dry_run=args.dry_run, new_id=getattr(args, "new_id", False))
+    build = build_extension(
+        source,
+        dry_run=args.dry_run,
+        new_id=getattr(args, "new_id", False),
+        panel_mode=getattr(args, "panel_mode", None),
+    )
     if args.dry_run:
         warn("Dry run — nothing was written.")
         return EXIT_OK
@@ -1247,7 +1439,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     source = pick_source(args.source)
     ok(f"Found the official Claude extension — {Style.bold(source.label)}")
     verify_official_source(source, allow_unverified=getattr(args, "allow_unverified", False))
-    build = build_extension(source, dry_run=args.dry_run, new_id=getattr(args, "new_id", False))
+    build = build_extension(
+        source,
+        dry_run=args.dry_run,
+        new_id=getattr(args, "new_id", False),
+        panel_mode=getattr(args, "panel_mode", None),
+    )
     if args.dry_run:
         warn("Dry run — nothing was written.")
         return EXIT_OK
@@ -1338,6 +1535,58 @@ def _doctor_arc_extension(verbose: bool = False) -> int:
     return problems
 
 
+def _doctor_split_panel(verbose: bool = False) -> int:
+    """Return number of split-panel setup problems on Arc."""
+    if not arc_installed():
+        return 0
+
+    problems = 0
+    heading("Arc split-panel mode")
+    build_ok = BUILD_EXTENSION_DIR.is_dir() and (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).is_file()
+    if not build_ok:
+        warn("No patched build — cannot verify split-panel assets.")
+        return 1
+
+    split_host = BUILD_EXTENSION_DIR / SPLIT_HOST_FILENAME
+    if split_host.is_file():
+        ok(f"Split host present ({SPLIT_HOST_FILENAME})")
+    else:
+        warn(f"Missing {SPLIT_HOST_FILENAME} in patched build. Re-run install.")
+        problems += 1
+
+    marker = json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8"))
+    mode = marker.get("panel_mode", "popup")
+    if mode == "split":
+        ok("Build panel mode: split (Arc default)")
+    elif mode == "popup":
+        warn("Build panel mode: popup — page margin disabled on Arc.")
+        detail("Run: claude-in-arc config --panel-mode split")
+        problems += 1
+    else:
+        info(f"Build panel mode: {mode} (Arc uses split at runtime for sidebar)")
+
+    info("Expected on Arc: page shrinks left (~410px), docked popup flush on the right,")
+    detail("page margin + invisible resize strip; popup docks over the gutter.")
+    detail("If it still feels like a separate OS window, drag Arc wider and check the page margin.")
+
+    if verbose and build_ok:
+        shim_path = BUILD_EXTENSION_DIR / SHIM_FILENAME
+        if shim_path.is_file():
+            shim = shim_path.read_text(encoding="utf-8")
+            if "SPLIT_POPUP_DELAY_MS" in shim:
+                ok("Shim applies margin before opening docked popup")
+            if "arcExplicitPopupMode" in shim:
+                ok("Shim defaults Arc to split unless popup is explicit")
+            if "forcePanelWindowBounds" in shim:
+                ok("Shim corrects popup bounds after windows.create")
+            if "openPanelInSplit" in shim:
+                ok("Shim defines openPanelInSplit")
+            if "claude-arc-split-host" in shim:
+                ok("Shim references split host script")
+
+    return problems
+
+
 def _doctor_conflicts() -> int:
     problems = 0
     heading("Conflicts")
@@ -1378,6 +1627,29 @@ def _print_verify_walkthrough() -> None:
             "Prelude asset in build",
             (BUILD_EXTENSION_DIR / PRELUDE_FILENAME).is_file() if build_ok else False,
             PRELUDE_FILENAME,
+        ),
+        (
+            "Split host in build",
+            (BUILD_EXTENSION_DIR / SPLIT_HOST_FILENAME).is_file() if build_ok else False,
+            SPLIT_HOST_FILENAME,
+        ),
+        (
+            "Arc panel mode is split",
+            (
+                json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8")).get(
+                    "panel_mode"
+                )
+                == "split"
+                if build_ok
+                else False
+            ),
+            (
+                json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8")).get(
+                    "panel_mode", "?"
+                )
+                if build_ok
+                else "n/a"
+            ),
         ),
         ("No Store copy on disk", not arc_state.store_copy_on_disk,
          ", ".join(arc_state.store_versions) if arc_state.store_versions else "none"),
@@ -1457,6 +1729,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         problems += 1
 
     problems += _doctor_arc_extension(verbose=verbose)
+    if arc_installed():
+        problems += _doctor_split_panel(verbose=verbose)
     problems += _doctor_conflicts()
 
     heading("Claude Desktop integration")
@@ -1473,11 +1747,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             warn("Arc is NOT linked yet. Run 'claude-in-arc link'.")
 
-    heading("Known limitation")
-    info("Claude Code '/chrome' browser automation is gated by a server-side flag")
-    detail("(chrome_ext_bridge_enabled) that Anthropic returns false for non-Chrome")
-    detail("browsers. No local tool can change that. The side-panel chat with page")
-    detail("context — which this tool enables — is unaffected.")
+    heading("Claude Code /chrome bridge")
+    _print_remote_bridge_limitation(verbose=verbose)
 
     heading("Logs")
     info(f"{LOG_FILE}")
@@ -1604,6 +1875,58 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    banner()
+    panel_mode = getattr(args, "panel_mode", None)
+    if not panel_mode:
+        mode = _panel_mode_from_state()
+        ok(f"Current panel mode: {Style.bold(mode)}")
+        detail("split   — page margin + docked window on Arc (default on Arc)")
+        detail("popup   — docked ~410px window flush to browser right edge")
+        detail("sidebar — in-page right column on Chrome/Brave (not supported on Arc)")
+        detail("")
+        detail("Set mode:  claude-in-arc config --panel-mode split|popup|sidebar")
+        detail("Then Reload the extension in arc://extensions")
+        return EXIT_OK
+
+    state = read_state()
+    state[PANEL_MODE_STATE_KEY] = panel_mode
+    write_state(state)
+    ok(f"Panel mode preference saved: {Style.bold(panel_mode)}")
+    if panel_mode == "sidebar" and arc_installed():
+        say("")
+        _arc_sidebar_unsupported_warning()
+    if panel_mode == "split" and not arc_installed():
+        warn("Split-panel mode is designed for Arc. On Chrome/Brave the shim uses popup.")
+
+    if not BUILD_EXTENSION_DIR.is_dir():
+        warn("No patched build yet. Run 'claude-in-arc install' to apply this mode.")
+        return EXIT_OK
+
+    heading("Rebuilding")
+    try:
+        source = pick_source(getattr(args, "source", None))
+    except CliError as exc:
+        warn(str(exc))
+        detail("Re-run 'claude-in-arc install --panel-mode " + panel_mode + "' to rebuild.")
+        return EXIT_OK
+
+    verify_official_source(source, allow_unverified=getattr(args, "allow_unverified", False))
+    build = build_extension(
+        source,
+        dry_run=args.dry_run,
+        new_id=state.get("new_id", False),
+        panel_mode=panel_mode,
+    )
+    if args.dry_run:
+        warn("Dry run — nothing was written.")
+        return EXIT_OK
+    ok("Rebuilt the extension with the new panel mode.")
+    detail(str(build.build_dir))
+    detail("Reload the extension in arc://extensions for the change to take effect.")
+    return EXIT_OK
+
+
 def cmd_reveal(args: argparse.Namespace) -> int:
     if not BUILD_EXTENSION_DIR.is_dir():
         fail("No build to reveal yet — run 'claude-in-arc install' first.")
@@ -1649,6 +1972,13 @@ def build_parser() -> argparse.ArgumentParser:
             "custom --source you fully trust.",
         )
 
+    def add_panel_mode(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--panel-mode",
+            choices=list(VALID_PANEL_MODES),
+            help="Panel presentation: split (Arc default), popup window, or in-page sidebar (Chrome/Brave).",
+        )
+
     p_install = sub.add_parser("install", help="Build the patched extension and link native messaging (default).")
     p_install.add_argument("--source", help="Path to an unpacked official extension to patch.")
     p_install.add_argument("--no-open", dest="open", action="store_false",
@@ -1662,6 +1992,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_new_id(p_install)
     add_verify(p_install)
+    add_panel_mode(p_install)
     add_common(p_install)
     p_install.set_defaults(func=cmd_install, open=True, link=True)
 
@@ -1669,8 +2000,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--source", help="Path to an unpacked official extension to patch.")
     add_new_id(p_build)
     add_verify(p_build)
+    add_panel_mode(p_build)
     add_common(p_build)
     p_build.set_defaults(func=cmd_build)
+
+    p_config = sub.add_parser(
+        "config",
+        help="Show or set panel mode (split, popup, or in-page sidebar).",
+    )
+    p_config.add_argument(
+        "--panel-mode",
+        choices=list(VALID_PANEL_MODES),
+        help="Set default panel mode and rebuild the patched extension.",
+    )
+    p_config.add_argument("--source", help="Path to an unpacked official extension to patch.")
+    add_verify(p_config)
+    add_common(p_config)
+    p_config.set_defaults(func=cmd_config)
 
     p_link = sub.add_parser("link", help="Mirror the Claude native-messaging host into Arc.")
     add_common(p_link)

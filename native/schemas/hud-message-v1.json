@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Zu9zwan9/claude-in-arc/schemas/hud-message-v1.json",
+  "title": "Claude-in-Arc HUD native messaging (v1 draft)",
+  "description": "JSON lines over chrome.runtime.connectNative between the patched Claude extension and the optional ClaudeInArcHUD macOS host.",
+  "oneOf": [
+    { "$ref": "#/$defs/extensionToHost" },
+    { "$ref": "#/$defs/hostToExtension" }
+  ],
+  "$defs": {
+    "extensionToHost": {
+      "type": "object",
+      "required": ["v", "dir", "type"],
+      "properties": {
+        "v": { "const": 1 },
+        "dir": { "const": "ext_to_host" },
+        "type": {
+          "enum": [
+            "ping",
+            "toggle_hud",
+            "set_collapsed",
+            "page_context",
+            "sidebar_state"
+          ]
+        },
+        "tabId": { "type": "integer" },
+        "collapsed": { "type": "boolean" },
+        "url": { "type": "string", "format": "uri" },
+        "title": { "type": "string" },
+        "visible": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "hostToExtension": {
+      "type": "object",
+      "required": ["v", "dir", "type"],
+      "properties": {
+        "v": { "const": 1 },
+        "dir": { "const": "host_to_ext" },
+        "type": {
+          "enum": [
+            "pong",
+            "hud_ready",
+            "hud_expanded",
+            "hud_collapsed",
+            "open_sidepanel",
+            "request_page_context"
+          ]
+        },
+        "expanded": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

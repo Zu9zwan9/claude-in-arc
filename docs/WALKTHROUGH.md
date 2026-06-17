@@ -7,15 +7,20 @@ reports a conflict, or you want to confirm every layer of the install.
 daily-use guide. Use this document when you need expected-vs-actual detail for
 each check, service worker console inspection, or a copy-paste recovery recipe.
 
-Current tool version: **v1.2.5** (service worker prelude forces shim when Arc UA
-is missing, `?tabId=` redirect for bare sidepanel opens).
+Current tool version: **v1.2.17** (split popup retries gutter alignment at 0/50/150ms
+on macOS Arc; closing the OS popup window removes the page margin).
+
+Previous: v1.2.16 guards split hide during reopen; v1.2.14 popup bounds match gutter;
+v1.2.12 split-panel mode (margin + docked popup); v1.2.11 auto-fallback from
+blocked iframe sidebar; v1.2.10 fixes blank sidebar CSP; v1.2.9 in-page sidebar;
+v1.2.8 docked popup flush to Arc browser right edge.
 
 ---
 
 ## 1. Confirm the tool and build exist
 
 ```bash
-claude-in-arc --version          # should print v1.2.5 or newer
+claude-in-arc --version          # should print v1.2.17 or newer
 claude-in-arc verify             # verbose checklist — all items should pass
 ```
 
@@ -26,6 +31,10 @@ claude-in-arc verify             # verbose checklist — all items should pass
 ├── CLAUDE_IN_ARC_PATCH.json     # patch marker (tool version, source browser)
 ├── arc-shim-prelude.js          # SW flag: force polyfill before shim runs
 ├── claude-arc-shim.js           # chrome.sidePanel polyfill
+├── claude-arc-sidebar-bridge.html  # iframe bridge for in-page sidebar mode
+├── claude-arc-sidebar-bridge.js    # bridge loader (MV3 CSP: no inline scripts)
+├── claude-arc-sidebar-host.js      # injected overlay host script (Chrome/Brave)
+├── claude-arc-split-host.js        # page margin + gutter (Arc split mode)
 ├── arc-sw-loader.js             # service worker loader
 └── manifest.json                # background.service_worker → arc-sw-loader.js
 ```
@@ -88,11 +97,79 @@ remove it from `arc://extensions`.
 
 ## 5. Verify click and keyboard shortcut
 
+### Split-panel mode (default on Arc, v1.2.12+)
+
 1. Open any normal webpage (not `chrome://` or `arc://` internal URLs).
 2. Click the **Claude** toolbar icon **or** press **⌘E**.
 
-**Expected:** a popup window opens with Claude's side panel UI
-(`sidepanel.html?tabId=…`). Claude can see the current page context.
+**Expected:** page content **narrows first** (~410px margin on the right), then a
+**separate OS popup window** is positioned **over that margin column** (not beside
+it) showing `sidepanel.html?tabId=…`. Until the popup docks, you may briefly see
+the page's own background in the margin — that is normal. Once aligned, the popup
+should cover the gutter; you should **not** see a persistent empty white column
+with the chat floating elsewhere. Only a thin invisible resize strip remains at
+the margin edge (drag to resize). Claude chat works with full page context — no
+"blocked by Arc" iframe error.
+
+**Closing the panel:** clicking the popup's OS window close button (red ×) closes
+Claude **and** removes the page margin so the tab returns to full width. This is
+intentional — the margin exists only while the panel is open. Reopening (⌘E)
+re-applies the margin.
+
+**Note:** Arc cannot embed the panel inside the browser window (no true split view
+API). The popup is a separate OS window positioned to *look* integrated beside
+your page. v1.2.17 re-syncs popup bounds at 0ms, 50ms, and 150ms after open
+because macOS Arc often ignores the first `windows.update`. v1.2.14+ aligns
+left/top/width/height with `anchor.right - panelWidth`. v1.2.13 shows the page
+margin before the popup opens. Drag Arc wider if the panel feels cramped.
+
+**Page console (split mode):**
+
+- `[claude-in-arc] split host injected gutter=claude-in-arc-split-gutter`
+- `[claude-in-arc] split show width=410`
+- `[claude-in-arc] split scheduling popup in 50ms margin=active`
+- `[claude-in-arc] split anchor windowId=… @left,top widthxheight`
+- `[claude-in-arc] split gutter sync @left,top widthxheight`
+- `[claude-in-arc] bounds corrected @left,top widthxheight` (may repeat at 0/50/150ms)
+
+### Popup-only mode
+
+```bash
+claude-in-arc config --panel-mode popup
+```
+
+Reload, then click the icon. **Expected:** docked popup only — no page margin.
+
+### In-page sidebar mode (Chrome/Brave only — not Arc)
+
+Arc blocks `chrome-extension://` pages inside page iframes ("This page has been
+blocked by Arc"). v1.2.12+ uses split-panel mode on Arc instead (margin + popup).
+
+On **Chrome or Brave**:
+
+```bash
+claude-in-arc config --panel-mode sidebar
+```
+
+Reload in `chrome://extensions`, then click the icon on a normal `https://` page.
+
+**Expected:** a fixed right column (~410px, resizable) inside the page — not a
+separate OS window. You should see the Claude chat UI (not just a dark empty
+column). Restricted URLs fall back to popup automatically.
+
+**Page console (sidebar mode):** on the webpage where the sidebar opened, open
+DevTools → Console and look for:
+
+- `[claude-in-arc] sidebar host injected root=claude-in-arc-sidebar-root`
+- `[claude-in-arc] sidebar show url=chrome-extension://…/claude-arc-sidebar-bridge.html?tabId=…`
+- `[claude-in-arc] sidebar bridge creating sidepanel iframe url=…`
+- `[claude-in-arc] sidebar panel ready`
+
+If you only see the dark shell (× button, resize edge) with no chat, see
+**§8 item 7** (blank sidebar).
+
+See [ARC_LIMITATIONS.md](ARC_LIMITATIONS.md) for why Arc Split View and native
+sidebar integration are not possible.
 
 **Do not** open bare `chrome-extension://…/sidepanel.html` without `?tabId=`.
 The chat needs the originating tab id in the URL; without it messages disappear
@@ -115,6 +192,8 @@ claude-in-arc verify
 | Arc prefs point at patched build | Path = `…/ClaudeInArc/Claude-in-Arc-Extension` |
 | Service worker | `arc-sw-loader.js` |
 | Shim asset in build | `claude-arc-shim.js` present |
+| Arc panel mode is split | `panel_mode: split` in patch marker |
+| Split host in build | `claude-arc-split-host.js` present |
 | No Store copy on disk | No `…/Arc/…/Extensions/fcoeoabgfenejglbffodgkkbkcdhcgfn/` folder |
 | Extension enabled | No "Disabled" badge; location = unpacked |
 
@@ -130,13 +209,13 @@ sidepanel.html (those are separate pages).
 **Look for:**
 
 - `[claude-in-arc] arc-shim-prelude loaded (service worker)`
-- `[claude-in-arc] claude-arc-shim v1.2.5 (service worker)`
+- `[claude-in-arc] claude-arc-shim v1.2.11 (service worker)`
 - `[claude-in-arc] sidePanel polyfill active`
-- `[claude-in-arc] wired action.onClicked handler`
 - Import errors for `arc-shim-prelude.js`, `claude-arc-shim.js`, or `arc-sw-loader.js`
 - A "Browser not supported" notification path — shim did not install (stale build)
-- After clicking the icon or pressing ⌘E: `action.onClicked tabId=…` or
-  `openPanelImmediate tabId=…`
+- After clicking the icon or pressing ⌘E on **Arc**: `openPanelInSplit tabId=…`,
+  then `split scheduling popup`, then `windows.create` (docked popup). On Chrome/Brave
+  with sidebar mode: `openPanelInSidebar tabId=…`
 
 **Tool logs:**
 
@@ -160,6 +239,45 @@ tail -50 ~/Library/Logs/claude-in-arc/claude-in-arc.log
    worker; use **Service worker → Inspect** on `arc://extensions`.
 5. **Extension disabled** — re-enable on `arc://extensions`.
 6. **Wrong folder loaded** — confirm path ends in `ClaudeInArc/Claude-in-Arc-Extension`.
+7. **Arc "This page has been blocked by Arc" in sidebar column** — Arc blocks
+   extension iframes in pages. Rebuild with v1.2.11+ (`claude-in-arc install`),
+   **Reload** in `arc://extensions`. v1.2.12+ uses split-panel mode on Arc instead.
+   See [ARC_LIMITATIONS.md](ARC_LIMITATIONS.md).
+8. **Still opens a detached OS window (title bar with extension id)** — common causes:
+   - **Popup-only mode** — right-click the extension icon → Panel mode must be
+     **Split panel (Arc)**, or run `claude-in-arc config --panel-mode split` and
+     Reload. v1.2.13 auto-upgrades legacy `popup` storage on Arc unless you
+     explicitly chose popup-only via the context menu.
+   - **Split margin not applied** — the page should shrink *before* the popup
+     appears. In the **page** DevTools console look for
+     `[claude-in-arc] split host injected` and `split show width=410`. If missing,
+     injection failed (restricted URL, stale build, or missing
+     `claude-arc-split-host.js`). Re-run `claude-in-arc install` and Reload.
+   - **Misaligned popup (empty white column + floating window)** — fixed in
+     v1.2.17: popup must cover the margin gutter exactly via retried bounds sync.
+     Service worker should log `split gutter sync @…` and repeated
+     `bounds corrected @…`. If the popup still floats center-screen, Reload after
+     `claude-in-arc install`, focus the Arc window, then press ⌘E again. Close
+     stray duplicate sidepanel tabs in the sidebar (from older `tabs.create`
+     fallbacks).
+   - **Arc limitation** — a narrow popup with a title bar is expected; true
+     in-browser embedding is impossible. Margin + gutter create the integrated
+     illusion. Drag Arc wider if needed.
+9. **Blank in-page sidebar on Chrome/Brave** — common causes:
+   - **Stale v1.2.9 build** — bridge used an inline `<script>` blocked by MV3
+     extension CSP (`script-src 'self'`). Rebuild with v1.2.10+:
+     `claude-in-arc install` (or `config --panel-mode sidebar`), then **Reload**
+     in `arc://extensions`. Confirm `claude-arc-sidebar-bridge.js` exists in the
+     build folder.
+   - **Missing `tabId`** — service worker should log
+     `openPanelInSidebar … url=…bridge.html?tabId=…`. If `tabId` is absent,
+     chat context breaks; use the toolbar icon on the target page (not a manual
+     extension-page URL).
+   - **Strict page CSP** — some sites block `chrome-extension://` iframes. The
+     host shows an error after ~12s or falls back to popup on restricted URLs.
+     Try another `https://` site or switch to popup mode (right-click icon).
+   - **Wrong console** — sidebar host logs appear in the **page** DevTools
+     console, not the service worker console.
 
 ---
 
@@ -206,3 +324,25 @@ Claude Code `/chrome` browser automation is gated by Anthropic's server-side
 `chrome_ext_bridge_enabled` flag, which returns `false` for non-Chrome browsers.
 Side-panel chat with page context — what this tool enables — does not depend on
 that bridge. See [README.md](../README.md#the-honest-limitation-claude-code-chrome-automation).
+
+### Remote bridge WebSocket errors in the service worker console
+
+If you see:
+
+```
+WebSocket connection to 'wss://bridge.claudeusercontent.com/chrome/…' failed:
+Error during WebSocket handshake: net::ERR_ADDRESS_INVALID
+```
+
+**Expected on Arc.** This is Anthropic's remote bridge for Claude Code `/chrome`
+automation — not `claude-arc-sidebar-bridge.html` (the local in-page sidebar
+loader). `claude-in-arc` does not patch or block that WebSocket.
+
+| Check | Meaning |
+|-------|---------|
+| Side panel opens, chat works | Patch is fine; ignore bridge console noise |
+| `/chrome` or MCP tools fail | Upstream limitation; use Chrome or upvote #34364 |
+| `bridgeDisplayName` missing in `chrome.storage.local` | Bridge never authenticated (normal on Arc) |
+
+`claude-in-arc doctor` prints a **Claude Code /chrome bridge** section when Arc
+(or another patched Chromium browser) is detected.

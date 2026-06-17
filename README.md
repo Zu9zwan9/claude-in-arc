@@ -96,7 +96,16 @@ Once loaded, Claude works like it does in Chrome:
 
 1. Navigate to any normal webpage (not `arc://` or `chrome://` internal pages).
 2. Click the **Claude toolbar icon** or press **`⌘E`** (Cmd+E).
-3. A popup window opens with Claude's side panel UI — the URL includes `sidepanel.html?tabId=…`, so Claude sees the **current page context**.
+3. A narrow **side window** opens on the right with Claude's panel UI — the URL includes `sidepanel.html?tabId=…`, so Claude sees the **current page context**.
+
+   **Arc limitation:** Arc does not implement Chrome's built-in `chrome.sidePanel`. The shim uses **split-panel mode** by default on Arc: page content narrows left while a docked popup shows Claude on the right (no blocked iframe). **In-page sidebar mode does not work on Arc** — Arc blocks `chrome-extension://` iframes in pages. On Chrome/Brave you can opt in:
+
+   ```bash
+   claude-in-arc config --panel-mode sidebar   # Chrome/Brave only; then Reload
+   claude-in-arc config --panel-mode popup      # Arc: popup-only, no page margin
+   ```
+
+   See **[docs/ARC_LIMITATIONS.md](docs/ARC_LIMITATIONS.md)** for split view, native sidebar, iframe blocking, and mode tradeoffs. **macOS Dynamic Island** is not available to browser extensions; see **[docs/DYNAMIC_ISLAND.md](docs/DYNAMIC_ISLAND.md)** for why and for the Phase 2 menu-bar / notch HUD companion (`native/` scaffold).
 4. Ask Claude about the page, highlight text, or use the panel normally.
 
 When Anthropic updates the official extension, re-run `claude-in-arc install` and click **Reload** on the unpacked entry in `arc://extensions`.
@@ -117,6 +126,23 @@ This almost always means Arc is still running the unpatched Store copy, or an ol
 4. In Arc, click **Reload** on the unpacked Claude extension.
 5. Open the **service worker console** (`arc://extensions` → Claude → Service worker → Inspect). Look for import errors in `claude-arc-shim.js` or `arc-sw-loader.js`, or a "Browser not supported" path (means the shim did not load).
 6. Try **`⌘E`** as well as the toolbar icon — both should open the panel.
+
+**Symptom: `WebSocket connection to 'wss://bridge.claudeusercontent.com/chrome/…' failed: net::ERR_ADDRESS_INVALID`**
+
+This comes from **Anthropic's official extension**, not from `claude-in-arc`. It is the remote bridge Claude Code's `/chrome` command uses for browser automation. Two different things are called "bridge" in this project:
+
+| Bridge | What it is | Works in Arc? |
+|--------|------------|:-------------:|
+| **Remote bridge** (`wss://bridge.claudeusercontent.com`) | Anthropic server for Claude Code `/chrome` MCP tools | ❌ |
+| **Sidebar bridge** (`claude-arc-sidebar-bridge.html`) | Local extension page for in-page sidebar mode (Chrome/Brave only) | N/A on Arc |
+
+On Arc (and other non-Chrome Chromium browsers), Anthropic's server-side flag `chrome_ext_bridge_enabled` evaluates `false`, so the remote bridge WebSocket does not succeed. Chromium reports that as `net::ERR_ADDRESS_INVALID` during the handshake — an expected symptom, not a DNS misconfiguration introduced by this patch.
+
+**What still works in Arc:** side-panel chat with page context, toolbar icon / ⌘E, split-panel mode, Claude Desktop native messaging (after `claude-in-arc link`).
+
+**What does not work in Arc:** Claude Code `/chrome` browser automation (`tabs_context_mcp`, etc.). Use Google Chrome for that workflow, or upvote [anthropics/claude-code#34364](https://github.com/anthropics/claude-code/issues/34364).
+
+Run `claude-in-arc doctor` — the **Claude Code /chrome bridge** section explains this. See also [docs/ARC_LIMITATIONS.md](docs/ARC_LIMITATIONS.md#claude-code-chrome-remote-bridge).
 
 **Other checks**
 
