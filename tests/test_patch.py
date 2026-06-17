@@ -88,6 +88,16 @@ class PatchEngineTests(unittest.TestCase):
         self.assertEqual(manifest["key"], FAKE_KEY)
         self.assertTrue(result.extension_id_preserved)
 
+    def test_loader_imports_prelude_before_shim_before_original(self):
+        ext = make_fixture(self.src_root)
+        result = core.build_extension(self._source(ext), dry_run=False)
+        loader = (result.build_dir / core.SW_LOADER_FILENAME).read_text()
+        prelude_idx = loader.index(core.PRELUDE_FILENAME)
+        shim_idx = loader.index(core.SHIM_FILENAME)
+        orig_idx = loader.index("service-worker-loader.js")
+        self.assertLess(prelude_idx, shim_idx, "prelude must import before shim")
+        self.assertLess(shim_idx, orig_idx, "shim must import before upstream worker")
+
     def test_loader_imports_shim_before_original(self):
         ext = make_fixture(self.src_root)
         result = core.build_extension(self._source(ext), dry_run=False)
@@ -157,7 +167,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertFalse(core.BUILD_EXTENSION_DIR.exists())
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.4")
+        self.assertEqual(core.shim_version_label(), "1.2.5")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))

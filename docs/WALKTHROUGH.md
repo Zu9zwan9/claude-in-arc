@@ -7,15 +7,15 @@ reports a conflict, or you want to confirm every layer of the install.
 daily-use guide. Use this document when you need expected-vs-actual detail for
 each check, service worker console inspection, or a copy-paste recovery recipe.
 
-Current tool version: **v1.2.1** (sidePanel stub detection, `verify` command,
-Store copy conflict handling).
+Current tool version: **v1.2.5** (service worker prelude forces shim when Arc UA
+is missing, `?tabId=` redirect for bare sidepanel opens).
 
 ---
 
 ## 1. Confirm the tool and build exist
 
 ```bash
-claude-in-arc --version          # should print v1.2.1 or newer
+claude-in-arc --version          # should print v1.2.5 or newer
 claude-in-arc verify             # verbose checklist — all items should pass
 ```
 
@@ -24,6 +24,7 @@ claude-in-arc verify             # verbose checklist — all items should pass
 ```
 ~/Library/Application Support/ClaudeInArc/Claude-in-Arc-Extension/
 ├── CLAUDE_IN_ARC_PATCH.json     # patch marker (tool version, source browser)
+├── arc-shim-prelude.js          # SW flag: force polyfill before shim runs
 ├── claude-arc-shim.js           # chrome.sidePanel polyfill
 ├── arc-sw-loader.js             # service worker loader
 └── manifest.json                # background.service_worker → arc-sw-loader.js
@@ -58,10 +59,10 @@ The default build keeps Anthropic's official extension id
 | **Recommended** — keep official id (Claude Desktop integration) | **Remove** the Store Claude entry. Keep only the unpacked build. |
 | Keep both Store + patched copies | Re-run `claude-in-arc install --new-id` and load the new folder. |
 
-**Why this matters:** Arc exposes a truthy but broken `chrome.sidePanel` stub.
-The unpatched Store copy hits that stub and the toolbar icon silently does
-nothing. v1.2.1 detects and replaces the stub; older builds no-op'd when the
-stub was present.
+**Why this matters:** Arc exposes native-looking but no-op `chrome.sidePanel`
+bindings. The unpatched Store copy calls those stubs and the toolbar icon
+silently does nothing. v1.2.5 forces the polyfill in the service worker via
+`arc-shim-prelude.js` (Arc's SW often omits `Arc/` from `navigator.userAgent`).
 
 `claude-in-arc install` will refuse to finish if the Store copy is still the
 active registration (unless you pass `--ignore-conflict`). Even when the patched
@@ -93,6 +94,12 @@ remove it from `arc://extensions`.
 **Expected:** a popup window opens with Claude's side panel UI
 (`sidepanel.html?tabId=…`). Claude can see the current page context.
 
+**Do not** open bare `chrome-extension://…/sidepanel.html` without `?tabId=`.
+The chat needs the originating tab id in the URL; without it messages disappear
+and Claude stays on the idle screen. If you must open manually, do it **while
+focused on the page you want context from** — v1.2.5 redirects bare opens to
+the active tab when possible.
+
 ---
 
 ## 6. Automated verification (`verify` / `doctor --verbose`)
@@ -117,12 +124,19 @@ claude-in-arc verify
 
 `arc://extensions` → Claude → **Service worker** → **Inspect**
 
+**Important:** use the **service worker** console, not options.html or
+sidepanel.html (those are separate pages).
+
 **Look for:**
 
-- Import errors for `claude-arc-shim.js` or `arc-sw-loader.js`
-- A "Browser not supported" notification path — means the shim did not install
-  (usually a stale Store copy or old build pre-v1.2.1)
-- Errors after clicking the icon or pressing ⌘E
+- `[claude-in-arc] arc-shim-prelude loaded (service worker)`
+- `[claude-in-arc] claude-arc-shim v1.2.5 (service worker)`
+- `[claude-in-arc] sidePanel polyfill active`
+- `[claude-in-arc] wired action.onClicked handler`
+- Import errors for `arc-shim-prelude.js`, `claude-arc-shim.js`, or `arc-sw-loader.js`
+- A "Browser not supported" notification path — shim did not install (stale build)
+- After clicking the icon or pressing ⌘E: `action.onClicked tabId=…` or
+  `openPanelImmediate tabId=…`
 
 **Tool logs:**
 
@@ -136,13 +150,16 @@ tail -50 ~/Library/Logs/claude-in-arc/claude-in-arc.log
 
 1. **Store copy still active or on disk** — Arc runs unpatched code; icon click
    hits the broken `chrome.sidePanel` stub and silently does nothing.
-2. **Old shim (pre-v1.2.1)** — a truthy but broken stub caused the shim to
-   no-op. Update the tool (`git pull` in `~/.claude-in-arc` or re-run
-   bootstrap), then `claude-in-arc install` and **Reload** in Arc.
-3. **Arc swallows `action.onClicked`** — fixed in v1.2.1+ by wiring
-   `action.setPopup` to `sidepanel.html?tabId=…`.
-4. **Extension disabled** — re-enable on `arc://extensions`.
-5. **Wrong folder loaded** — confirm path ends in `ClaudeInArc/Claude-in-Arc-Extension`.
+2. **Old shim (pre-v1.2.5)** — Arc service workers often lack `Arc/` in UA, so
+   v1.2.4 could skip installing the polyfill while native stubs looked valid.
+   Update (`git pull`), `claude-in-arc install`, **Reload** in Arc.
+3. **Bare `sidepanel.html` without `?tabId=`** — panel UI loads but chat is
+   broken (messages vanish, idle "How can I help you today?"). Use the toolbar
+   icon / ⌘E on the target page, or let v1.2.5 redirect bare opens.
+4. **Wrong console** — options.html / sidepanel DevTools are not the service
+   worker; use **Service worker → Inspect** on `arc://extensions`.
+5. **Extension disabled** — re-enable on `arc://extensions`.
+6. **Wrong folder loaded** — confirm path ends in `ClaudeInArc/Claude-in-Arc-Extension`.
 
 ---
 

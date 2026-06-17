@@ -183,6 +183,7 @@ function makeChrome(opts) {
 function loadShim(mockChrome, sandboxExtras) {
   const sandbox = {
     chrome: mockChrome,
+    globalThis: {},
     navigator: { userAgent: (sandboxExtras && sandboxExtras.userAgent) || "node-harness" },
     console,
     Map,
@@ -190,7 +191,11 @@ function loadShim(mockChrome, sandboxExtras) {
     Object,
     encodeURIComponent,
     setTimeout,
+    location: sandboxExtras && sandboxExtras.location,
   };
+  if (sandboxExtras && sandboxExtras.forcePolyfill) {
+    sandbox.globalThis.__CLAUDE_IN_ARC_FORCE_POLYFILL = true;
+  }
   vm.createContext(sandbox);
   vm.runInContext(SHIM_SRC, sandbox, { filename: "claude-arc-shim.js" });
   return mockChrome.sidePanel;
@@ -400,9 +405,35 @@ async function main() {
     assert(env.calls.windowsCreate.length === 1, "forced shim must open popup");
   }
 
+  // --- Scenario 9b: prelude flag forces shim when UA lacks Arc token ----------
+  {
+    const env = makeChrome();
+    function nativeLike(name) {
+      const fn = function () {};
+      fn.toString = function () {
+        return "function " + name + "() { [native code] }";
+      };
+      return fn;
+    }
+    env.chrome.sidePanel = {
+      open: nativeLike("open"),
+      setOptions: nativeLike("setOptions"),
+    };
+    const sp = loadShim(env.chrome, {
+      userAgent: "Mozilla/5.0 Chrome/120",
+      forcePolyfill: true,
+    });
+    assert(
+      sp && sp.__claudeInArcShim === true,
+      "prelude force flag must install shim without Arc UA"
+    );
+    await replayVe(env.chrome, 2222);
+    assert(env.calls.windowsCreate.length === 1, "prelude-forced shim must open popup");
+  }
+
   // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
   {
-    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.4"') !== -1, "shim must declare SHIM_VERSION 1.2.4");
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.5"') !== -1, "shim must declare SHIM_VERSION 1.2.5");
   }
 
   console.log("OK: open_side_panel path produces popup-window behavior via the shim");

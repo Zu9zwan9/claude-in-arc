@@ -39,7 +39,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.4";
+  var SHIM_VERSION = "1.2.5";
 
   function log() {
     try {
@@ -60,6 +60,69 @@
   // Bail out quietly if we are not in an extension context.
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
     return;
+  }
+
+  function isServiceWorkerContext() {
+    try {
+      return (
+        typeof self !== "undefined" &&
+        typeof ServiceWorkerGlobalScope !== "undefined" &&
+        self instanceof ServiceWorkerGlobalScope
+      );
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function isSidepanelPage() {
+    try {
+      return (
+        typeof location !== "undefined" &&
+        /sidepanel\.html$/i.test(location.pathname || "")
+      );
+    } catch (_e2) {
+      return false;
+    }
+  }
+
+  // Opening sidepanel.html without ?tabId= leaves the chat without page context —
+  // messages disappear and Claude never answers. Redirect to the active tab.
+  function ensureTabIdInPanelUrl() {
+    if (!isSidepanelPage()) return;
+    try {
+      var params = new URLSearchParams(location.search || "");
+      if (params.has("tabId")) return;
+      log("sidepanel missing tabId — resolving active tab for redirect");
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+        void chrome.runtime.lastError;
+        var t = tabs && tabs[0];
+        if (!t || t.id == null) {
+          chrome.tabs.query({ active: true, currentWindow: true }, function (tabs2) {
+            void chrome.runtime.lastError;
+            redirectSidepanelWithTabId(tabs2 && tabs2[0] && tabs2[0].id);
+          });
+          return;
+        }
+        redirectSidepanelWithTabId(t.id);
+      });
+    } catch (_e3) { /* no-op */ }
+  }
+
+  function redirectSidepanelWithTabId(tabId) {
+    if (tabId == null) {
+      warn(
+        "could not resolve tabId — click the Claude icon (or press Cmd+E) on the page you want context from"
+      );
+      return;
+    }
+    var path = "sidepanel.html?tabId=" + encodeURIComponent(tabId);
+    var target = chrome.runtime.getURL(path);
+    log("redirecting sidepanel to tabId=" + tabId);
+    location.replace(target);
+  }
+
+  if (!isServiceWorkerContext()) {
+    ensureTabIdInPanelUrl();
   }
 
   // If the browser already supports the real Side Panel API, do nothing.
@@ -97,6 +160,9 @@
   // still no-ops — nativeSidePanelWorks() alone lets those through and clicks
   // silently do nothing. Force our polyfill on known forks.
   function shouldForcePolyfill() {
+    try {
+      if (globalThis.__CLAUDE_IN_ARC_FORCE_POLYFILL === true) return true;
+    } catch (_e) { /* no-op */ }
     var ua = navigator.userAgent || "";
     if (/Arc\//.test(ua)) return true;
     if (/Company\/The Browser Company/.test(ua)) return true;
@@ -107,7 +173,11 @@
     return;
   }
 
-  log("claude-arc-shim v" + SHIM_VERSION);
+  log(
+    "claude-arc-shim v" +
+      SHIM_VERSION +
+      (isServiceWorkerContext() ? " (service worker)" : " (extension page)")
+  );
   if (shouldForcePolyfill()) {
     log("forcing polyfill on Arc/Chromium fork (native sidePanel may be a no-op)");
   } else {
@@ -630,4 +700,12 @@
 
   installSidePanelPolyfill();
   wireToolbarOpenHandlers();
+
+  // Upstream may register after us; re-assert cleared popup + handlers.
+  if (isServiceWorkerContext()) {
+    try {
+      setTimeout(wireToolbarOpenHandlers, 0);
+      setTimeout(wireToolbarOpenHandlers, 1000);
+    } catch (_e) { /* no-op */ }
+  }
 })();
