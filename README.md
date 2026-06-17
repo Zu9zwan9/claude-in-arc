@@ -22,13 +22,28 @@ Run the official "Claude in Chrome" extension in Arc — real side‑panel chat,
 
 </div>
 
-## Install in one line
+## Quick Start
+
+Everything you need to get Claude's side panel working in Arc. For a step-by-step verification checklist when something goes wrong, see **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)**.
+
+### Prerequisites
+
+Before you run the installer, make sure you have:
+
+1. **macOS** — this tool supports macOS only.
+2. **Arc** — [arc.net](https://arc.net). The installer works without Arc installed, but you need it to load the extension.
+3. **System Python 3** — ships with macOS or the Xcode Command Line Tools (`xcode-select --install`).
+4. **The official Claude in Chrome extension** — install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) in **Arc or any Chromium browser** (Chrome, Brave, Edge, …). The tool auto-detects the newest copy on your Mac and verifies it is genuine before patching.
+
+No `sudo`, no Homebrew, no Node — just system `python3`.
+
+### Recommended: one-line install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Zu9zwan9/claude-in-arc/main/bootstrap.sh | bash
 ```
 
-That detects macOS + Arc + your installed Claude extension, fetches the tool into `~/.claude-in-arc`, verifies the extension is genuine, builds the Arc‑compatible copy, and prints the one remaining click. **macOS only. Zero dependencies** (system `python3`). No `sudo`, ever.
+This downloads the tool into `~/.claude-in-arc`, puts `claude-in-arc` on your PATH, finds your installed Claude extension, cryptographically verifies it, builds an Arc-compatible copy, links Claude Desktop native messaging (if available), opens Arc's extensions page, and reveals the build folder in Finder.
 
 **Prefer to read before you run** (recommended for any `curl | bash`):
 
@@ -38,13 +53,99 @@ less bootstrap.sh          # inspect it
 bash bootstrap.sh          # then run
 ```
 
-**Or clone first:**
+### Alternative: clone and install
 
 ```bash
 git clone https://github.com/Zu9zwan9/claude-in-arc.git
 cd claude-in-arc
 ./install.sh
 ```
+
+This does the same thing as the one-liner, but keeps a full git checkout in the repo folder instead of `~/.claude-in-arc`.
+
+### Step-by-step Arc setup (the one manual step)
+
+Chromium requires a human to load an unpacked extension — no tool can bypass this security boundary. The installer does everything else; you only need about fifteen seconds in Arc:
+
+1. Open **`arc://extensions`** in Arc (the installer opens this for you).
+2. Turn on **Developer mode** — toggle in the top-right corner.
+3. If you see a **Claude** entry from the Chrome Web Store, click **Remove** on it. The default build keeps Anthropic's official extension id, so Arc can only run one copy at a time. Keeping the Store copy is the #1 reason toolbar clicks do nothing.
+4. Click **Load unpacked** and choose this folder (also revealed in Finder):
+
+   ```
+   ~/Library/Application Support/ClaudeInArc/Claude-in-Arc-Extension
+   ```
+
+5. Confirm the extension card shows:
+   - **Source:** Load unpacked
+   - **Service worker:** `arc-sw-loader.js` (click "Service worker" — the console should have no red import errors)
+
+6. Run a quick check from Terminal:
+
+   ```bash
+   claude-in-arc verify
+   ```
+
+   All checks should pass. If any are red, see [Troubleshooting](#troubleshooting) below or the full checklist in [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
+
+> **Two Claude entries?** Either remove the Store copy (recommended — keeps Claude Desktop integration), or re-run with `claude-in-arc install --new-id` to keep both under separate ids. Run `claude-in-arc doctor` to detect this automatically.
+
+### Daily use
+
+Once loaded, Claude works like it does in Chrome:
+
+1. Navigate to any normal webpage (not `arc://` or `chrome://` internal pages).
+2. Click the **Claude toolbar icon** or press **`⌘E`** (Cmd+E).
+3. A popup window opens with Claude's side panel UI — the URL includes `sidepanel.html?tabId=…`, so Claude sees the **current page context**.
+4. Ask Claude about the page, highlight text, or use the panel normally.
+
+When Anthropic updates the official extension, re-run `claude-in-arc install` and click **Reload** on the unpacked entry in `arc://extensions`.
+
+### Troubleshooting
+
+**Symptom: clicking the Claude icon does nothing**
+
+This almost always means Arc is still running the unpatched Store copy, or an old build from before v1.2.1. Arc exposes a broken `chrome.sidePanel` stub that silently swallows clicks.
+
+1. Run **`claude-in-arc verify`** — it prints expected vs. actual for every check.
+2. On `arc://extensions`, **Remove** the Store "Claude" entry. Keep only the **Load unpacked** copy pointing at `ClaudeInArc/Claude-in-Arc-Extension`.
+3. Update and rebuild:
+   ```bash
+   cd ~/.claude-in-arc && git pull    # if you used the one-liner
+   claude-in-arc install
+   ```
+4. In Arc, click **Reload** on the unpacked Claude extension.
+5. Open the **service worker console** (`arc://extensions` → Claude → Service worker → Inspect). Look for import errors in `claude-arc-shim.js` or `arc-sw-loader.js`, or a "Browser not supported" path (means the shim did not load).
+6. Try **`⌘E`** as well as the toolbar icon — both should open the panel.
+
+**Other checks**
+
+| Command | When to use |
+|---------|-------------|
+| `claude-in-arc doctor` | Quick health check |
+| `claude-in-arc verify` | Full verbose checklist (same as `doctor --verbose`) |
+| `claude-in-arc reveal` | Re-open the build folder in Finder |
+| `tail -50 ~/Library/Logs/claude-in-arc/claude-in-arc.log` | Inspect tool logs |
+
+See **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)** for the complete forensic checklist, service worker console guidance, and a copy-paste recovery recipe.
+
+### Optional: Claude Desktop integration
+
+Side-panel chat with page context works without this. For Claude Desktop to talk to the browser extension:
+
+1. Enable the browser extension in **Claude Desktop → Settings**.
+2. Run `claude-in-arc link`
+3. Confirm with `claude-in-arc doctor` — look for "Arc is linked to the native-messaging host."
+
+Skip with `claude-in-arc install --no-link` if you do not use Claude Desktop.
+
+### Optional: uninstall
+
+```bash
+claude-in-arc uninstall
+```
+
+This removes the patched build, restores any backed-up native-messaging manifest, and clears tool state. Also remove the unpacked Claude entry from `arc://extensions` if it is still listed.
 
 ---
 
@@ -107,37 +208,6 @@ graph TD
     F -->|"icon click → popup window<br/>sidepanel.html?tabId=N"| G["Claude side panel<br/>(with page context)"]
 ```
 
-## The one remaining click
-
-Loading an unpacked extension is the single step Chromium requires a human to do
-(no tool can do it silently — that's a security boundary, by design). The
-installer does everything else and even opens the page and reveals the folder
-for you. All that's left:
-
-1. In Arc, go to `arc://extensions` (the installer opens this for you).
-2. Turn on **Developer mode** (toggle, top‑right).
-3. Click **Load unpacked** → choose the folder it reveals:
-   `~/Library/Application Support/ClaudeInArc/Claude-in-Arc-Extension`
-
-Then click the Claude toolbar icon (or press `Cmd+E`). The panel opens as a popup
-window with full page context. 🎉
-
-> **Two Claude entries?** The default build keeps the **official extension id**, so
-> Arc loads only one copy. Either remove the Store copy, **or** re‑run with
-> `--new-id` to keep both. `claude-in-arc doctor` detects this for you.
-
-### Troubleshooting: icon click does nothing
-
-See **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)** for the full checklist. Quick version:
-
-1. `claude-in-arc verify` — conflicts and load state must be green.
-2. Remove the **Store** Claude copy on `arc://extensions` (keep Load unpacked).
-3. Re-run `claude-in-arc install`, then **Reload** the unpacked extension.
-4. Inspect the service worker console for import errors.
-
-Arc exposes a broken `chrome.sidePanel` stub; the patch replaces it and wires the
-toolbar icon to open `sidepanel.html` as a popup when Arc swallows click events.
-
 ## Commands & flags
 
 ```bash
@@ -150,7 +220,7 @@ claude-in-arc reveal       # open the build folder in Finder
 claude-in-arc uninstall    # full rollback: remove build, restore backups, clear state
 ```
 
-Flags: `-v/--verbose`, `-q/--quiet`, `--dry-run` (preview), `--new-id` (coexist with the Store copy), `--source PATH` (patch a specific unpacked extension), `--no-open` (don't launch Arc/Finder), `--no-link` (skip native messaging), `--allow-unverified` (skip the authenticity check — not recommended).
+Flags: `-v/--verbose`, `-q/--quiet`, `--dry-run` (preview), `--new-id` (coexist with the Store copy), `--source PATH` (patch a specific unpacked extension), `--no-open` (don't launch Arc/Finder), `--no-link` (skip native messaging), `--ignore-conflict` (build even when the Store copy is active — not recommended), `--allow-unverified` (skip the authenticity check — not recommended).
 
 ## The honest limitation: Claude Code `/chrome` automation
 
@@ -176,13 +246,7 @@ be trustworthy and is fully documented in [`docs/SECURITY.md`](docs/SECURITY.md)
 
 ## Requirements
 
-- macOS
-- The system `python3` (ships with the Xcode Command Line Tools: `xcode-select --install`)
-- The official **Claude in Chrome** extension installed in any Chromium browser ([Web Store](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn))
-
-## Updating
-
-When the official extension updates in your browser, re‑run `claude-in-arc install` to rebuild from the new version, then hit **Reload** on `arc://extensions`.
+See [Prerequisites](#prerequisites) in Quick Start. In short: macOS, system `python3`, Arc, and the official Claude extension from the Web Store.
 
 ## Development
 
