@@ -1,13 +1,25 @@
 import Foundation
 
-/// Chrome native-messaging host stub.
+/// Chrome native-messaging host for Claude-in-Arc HUD.
 /// Protocol: 4-byte little-endian length + UTF-8 JSON per message on stdin/stdout.
-/// See https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
+/// Message schema: native/schemas/hud-message-v1.json
 
-struct NativeMessage: Codable {
+private struct InboundMessage: Decodable {
+    var v: Int?
+    var dir: String?
     var type: String?
     var tabId: Int?
-    var text: String?
+    var collapsed: Bool?
+    var url: String?
+    var title: String?
+    var visible: Bool?
+}
+
+private struct OutboundMessage: Encodable {
+    var v: Int = 1
+    var dir: String = "host_to_ext"
+    var type: String
+    var expanded: Bool?
 }
 
 func readMessage(from handle: FileHandle) -> Data? {
@@ -19,8 +31,8 @@ func readMessage(from handle: FileHandle) -> Data? {
     return payload.count == Int(length) ? payload : nil
 }
 
-func writeMessage(_ object: [String: Any], to handle: FileHandle) {
-    guard let json = try? JSONSerialization.data(withJSONObject: object),
+func writeMessage<T: Encodable>(_ message: T, to handle: FileHandle) {
+    guard let json = try? JSONEncoder().encode(message),
           json.count <= Int(UInt32.max) else { return }
     var length = UInt32(json.count).littleEndian
     let lengthData = Data(bytes: &length, count: 4)
@@ -32,20 +44,31 @@ let stdin = FileHandle.standardInput
 let stdout = FileHandle.standardOutput
 let stderr = FileHandle.standardError
 
-writeMessage(["type": "ready", "host": "com.claudeinarac.hud"], to: stdout)
+writeMessage(OutboundMessage(type: "hud_ready"), to: stdout)
 
 while let data = readMessage(from: stdin) {
-    let decoded = try? JSONDecoder().decode(NativeMessage.self, from: data)
-    let kind = decoded?.type ?? "unknown"
     if let line = String(data: data, encoding: .utf8) {
         stderr.write(Data("[ClaudeInArcHUDHost] \(line)\n".utf8))
     }
-    writeMessage(
-        [
-            "type": "ack",
-            "received": kind,
-            "echoTabId": decoded?.tabId as Any,
-        ],
-        to: stdout
-    )
+
+    let decoded = try? JSONDecoder().decode(InboundMessage.self, from: data)
+    let kind = decoded?.type ?? "unknown"
+
+    switch kind {
+    case "ping":
+        writeMessage(OutboundMessage(type: "pong"), to: stdout)
+    case "toggle_hud":
+        writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
+    case "set_collapsed":
+        let collapsed = decoded?.collapsed ?? true
+        writeMessage(
+            OutboundMessage(type: collapsed ? "hud_collapsed" : "hud_expanded", expanded: !collapsed),
+            to: stdout
+        )
+    case "page_context":
+        // M2: forward to menu-bar app via XPC / distributed notification.
+        writeMessage(OutboundMessage(type: "pong"), to: stdout)
+    default:
+        writeMessage(OutboundMessage(type: "pong"), to: stdout)
+    }
 }

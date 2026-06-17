@@ -60,6 +60,11 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
+# Optional Phase 2 notch HUD companion (native/ClaudeInArcHUD).
+HUD_HOST_NAME = "com.claudeinarac.hud"
+HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
+HUD_STATE_KEY = "hud_native_manifest"
+
 TOOL_VERSION = "1.2.23"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
@@ -957,6 +962,159 @@ def link_native_messaging(dry_run: bool = False) -> LinkResult:
 
 
 # ---------------------------------------------------------------------------
+# Notch HUD companion (Phase 2 scaffold)
+# ---------------------------------------------------------------------------
+
+def _hud_package_dir(repo_root: Optional[Path] = None) -> Optional[Path]:
+    root = repo_root or _find_tool_repo_root()
+    if root is None:
+        return None
+    pkg = root / "native" / "ClaudeInArcHUD"
+    return pkg if pkg.is_dir() else None
+
+
+def _hud_host_binary(pkg_dir: Path, release: bool = False) -> Path:
+    config = "release" if release else "debug"
+    return pkg_dir / ".build" / config / "ClaudeInArcHUDHost"
+
+
+def _hud_app_binary(pkg_dir: Path, release: bool = False) -> Path:
+    config = "release" if release else "debug"
+    return pkg_dir / ".build" / config / "ClaudeInArcHUD"
+
+
+def _hud_manifest_template(pkg_dir: Path) -> Path:
+    return pkg_dir / "native-messaging" / HUD_HOST_FILENAME
+
+
+@dataclass
+class HudBuildResult:
+    status: str  # "built", "dry-run", "missing-repo", "build-failed"
+    binary: Optional[Path] = None
+    message: str = ""
+
+
+@dataclass
+class HudInstallResult:
+    status: str  # "installed", "already", "dry-run", "missing-binary", "missing-repo"
+    target: Optional[Path] = None
+    binary: Optional[Path] = None
+
+
+def build_hud(dry_run: bool = False, release: bool = False) -> HudBuildResult:
+    pkg = _hud_package_dir()
+    if pkg is None:
+        return HudBuildResult(status="missing-repo", message="native/ClaudeInArcHUD not found")
+
+    if dry_run:
+        config = "release" if release else "debug"
+        return HudBuildResult(
+            status="dry-run",
+            binary=_hud_host_binary(pkg, release=release),
+            message=f"[dry-run] would run: swift build -c {config} in {pkg}",
+        )
+
+    cmd = ["swift", "build", "-c", "release" if release else "debug"]
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=str(pkg),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return HudBuildResult(status="build-failed", message=str(e))
+
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "swift build failed").strip()
+        return HudBuildResult(status="build-failed", message=msg)
+
+    binary = _hud_host_binary(pkg, release=release)
+    if not binary.is_file():
+        return HudBuildResult(status="build-failed", message=f"expected binary missing: {binary}")
+
+    return HudBuildResult(status="built", binary=binary, message="swift build succeeded")
+
+
+def install_hud_manifest(dry_run: bool = False, release: bool = False) -> HudInstallResult:
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return HudInstallResult(status="missing-repo")
+
+    pkg = _hud_package_dir()
+    if pkg is None:
+        return HudInstallResult(status="missing-repo")
+
+    binary = _hud_host_binary(pkg, release=release)
+    if not binary.is_file():
+        built = build_hud(dry_run=False, release=release)
+        if built.status != "built" or built.binary is None:
+            return HudInstallResult(status="missing-binary", binary=binary)
+        binary = built.binary
+
+    template = _hud_manifest_template(pkg)
+    if not template.is_file():
+        return HudInstallResult(status="missing-repo")
+
+    data = json.loads(template.read_text(encoding="utf-8"))
+    data["name"] = HUD_HOST_NAME
+    data["path"] = str(binary.resolve())
+    origins = list(data.get("allowed_origins") or [])
+    official_origin = f"chrome-extension://{OFFICIAL_EXTENSION_ID}/"
+    if official_origin not in origins:
+        origins.append(official_origin)
+    data["allowed_origins"] = origins
+
+    target = _nmh_dir(arc) / HUD_HOST_FILENAME
+
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if existing.get("path") == data.get("path"):
+                return HudInstallResult(status="already", target=target, binary=binary)
+        except (ValueError, OSError):
+            pass
+
+    if dry_run:
+        return HudInstallResult(status="dry-run", target=target, binary=binary)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pre_existed = target.is_file()
+    backup = _backup_file(target) if pre_existed else None
+
+    target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    state = read_state()
+    state[HUD_STATE_KEY] = str(target)
+    state["hud_native_manifest_preexisted"] = pre_existed
+    if backup is not None:
+        state["hud_native_manifest_backup"] = str(backup)
+    write_state(state)
+
+    return HudInstallResult(status="installed", target=target, binary=binary)
+
+
+def open_hud_app(release: bool = False) -> bool:
+    pkg = _hud_package_dir()
+    if pkg is None:
+        return False
+    binary = _hud_app_binary(pkg, release=release)
+    if not binary.is_file():
+        built = build_hud(dry_run=False, release=release)
+        if built.status != "built":
+            return False
+        binary = _hud_app_binary(pkg, release=release)
+    if not binary.is_file():
+        return False
+    try:
+        subprocess.Popen([str(binary.resolve())], start_new_session=True)
+        return True
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Arc state inspection
 # ---------------------------------------------------------------------------
 
@@ -1794,6 +1952,69 @@ def cmd_build(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_hud(args: argparse.Namespace) -> int:
+    banner()
+    action = getattr(args, "hud_action", "build")
+
+    if action == "build":
+        heading("Building Claude-in-Arc HUD")
+        result = build_hud(dry_run=args.dry_run, release=args.release)
+        if result.status == "dry-run":
+            info(result.message)
+            return EXIT_OK
+        if result.status == "missing-repo":
+            fail("Could not find native/ClaudeInArcHUD. Run from the claude-in-arc repo.")
+            return EXIT_ERROR
+        if result.status == "build-failed":
+            fail("swift build failed.")
+            detail(result.message)
+            return EXIT_ERROR
+        ok("Built native HUD binaries.")
+        if result.binary:
+            detail(str(result.binary))
+        pkg = _hud_package_dir()
+        if pkg:
+            detail(str(_hud_app_binary(pkg, release=args.release)))
+        return EXIT_OK
+
+    if action == "install":
+        heading("Installing HUD native-messaging host")
+        result = install_hud_manifest(dry_run=args.dry_run, release=args.release)
+        if result.status == "installed":
+            ok("Registered HUD host in Arc.")
+            detail(str(result.target))
+            detail(str(result.binary))
+        elif result.status == "already":
+            ok("HUD host already registered.")
+        elif result.status == "dry-run":
+            info("[dry-run] would write HUD manifest:")
+            detail(str(result.target))
+            detail(str(result.binary))
+        elif result.status == "missing-binary":
+            fail("HUD host binary missing. Run: claude-in-arc hud build")
+            return EXIT_ERROR
+        else:
+            fail("Could not install HUD host.")
+            return EXIT_ERROR
+        return EXIT_OK
+
+    if action == "open":
+        heading("Launching Claude-in-Arc HUD")
+        if args.dry_run:
+            pkg = _hud_package_dir()
+            if pkg:
+                info(f"[dry-run] would launch {_hud_app_binary(pkg, release=args.release)}")
+            return EXIT_OK
+        if open_hud_app(release=args.release):
+            ok("Launched menu-bar HUD app.")
+            return EXIT_OK
+        fail("Could not launch HUD. Run: claude-in-arc hud build")
+        return EXIT_ERROR
+
+    fail(f"Unknown hud action: {action}")
+    return EXIT_USAGE
+
+
 def cmd_link(args: argparse.Namespace) -> int:
     banner()
     heading("Connecting Arc to Claude Desktop")
@@ -2443,6 +2664,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_link = sub.add_parser("link", help="Mirror the Claude native-messaging host into Arc.")
     add_common(p_link)
     p_link.set_defaults(func=cmd_link)
+
+    p_hud = sub.add_parser(
+        "hud",
+        help="Build, install, or launch the optional macOS notch HUD companion.",
+    )
+    p_hud.add_argument(
+        "hud_action",
+        nargs="?",
+        choices=("build", "install", "open"),
+        default="build",
+        help="build (default), install native-messaging manifest, or open menu-bar app",
+    )
+    p_hud.add_argument(
+        "--release",
+        action="store_true",
+        help="Use release build configuration (default: debug).",
+    )
+    add_common(p_hud)
+    p_hud.set_defaults(func=cmd_hud, release=False)
 
     p_doctor = sub.add_parser("doctor", help="Diagnose the current setup.")
     p_doctor.add_argument(

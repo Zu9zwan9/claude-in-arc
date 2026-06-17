@@ -657,6 +657,17 @@ class UpgradeTests(unittest.TestCase):
         self.assertTrue(args.no_reload)
         self.assertTrue(args.no_test_page)
 
+    def test_hud_parser_defaults_to_build(self):
+        parser = core.build_parser()
+        args = parser.parse_args(["hud"])
+        self.assertEqual(args.hud_action, "build")
+        self.assertEqual(args.func, core.cmd_hud)
+
+    def test_hud_help_exits(self):
+        parser = core.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["hud", "--help"])
+
     def test_cmd_upgrade_skips_pull_with_no_pull(self):
         ext = make_fixture(Path(self._tmp.name) / "src")
         source = core.SourceExtension(
@@ -717,6 +728,26 @@ class UpgradeTests(unittest.TestCase):
         ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.23")):
             rc = core.cmd_upgrade(args)
         self.assertEqual(rc, core.EXIT_ERROR)
+
+
+class HudCliTests(unittest.TestCase):
+    def test_hud_package_dir_from_repo(self):
+        pkg = core._hud_package_dir()
+        self.assertIsNotNone(pkg)
+        self.assertTrue((pkg / "Package.swift").is_file())
+
+    def test_hud_manifest_template_has_extension_origin(self):
+        pkg = core._hud_package_dir()
+        self.assertIsNotNone(pkg)
+        template = core._hud_manifest_template(pkg)
+        data = json.loads(template.read_text(encoding="utf-8"))
+        origin = f"chrome-extension://{core.OFFICIAL_EXTENSION_ID}/"
+        self.assertIn(origin, data.get("allowed_origins", []))
+
+    def test_hud_build_dry_run(self):
+        result = core.build_hud(dry_run=True)
+        self.assertEqual(result.status, "dry-run")
+        self.assertIn("swift build", result.message)
 
 
 if __name__ == "__main__":

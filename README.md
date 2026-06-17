@@ -6,7 +6,7 @@
 
 Run the official "Claude in Chrome" extension in Arc — side‑panel chat with full page context. No more *"This browser is not supported. Use Google Chrome, Microsoft Edge, or Brave."*
 
-> **Arc honesty check:** Arc does **not** support Chrome's in-browser side panel. Claude opens in a **separate ~410px OS window** docked beside your page (split mode shrinks the page left). That is the best available UX — not a bug. See [docs/ARC_LIMITATIONS.md](docs/ARC_LIMITATIONS.md). For other options (Chrome sidebar, native HUD, what won't work), see [research/arc-side-panel-alternatives.md](research/arc-side-panel-alternatives.md).
+> **Arc honesty check:** Arc does **not** support Chrome's in-browser side panel. Claude opens in a **separate ~410px OS window** docked beside your page (split mode shrinks the page left). That is the best **extension-only** UX — not a bug. For a more **integrated** feel on notched MacBooks, see the optional Phase 2 notch HUD ([research/notch-hud-integration.md](research/notch-hud-integration.md), `claude-in-arc hud`). See [docs/ARC_LIMITATIONS.md](docs/ARC_LIMITATIONS.md). For all ranked options, see [research/arc-side-panel-alternatives.md](research/arc-side-panel-alternatives.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-black.svg?logo=apple)](#requirements)
@@ -245,6 +245,9 @@ claude-in-arc cleanup      # remove leftover Store extension files after arc://e
 claude-in-arc verify       # verbose walkthrough: expected vs actual for every check (see docs/WALKTHROUGH.md)
 claude-in-arc build        # only (re)build the patched extension
 claude-in-arc link         # mirror the Claude native-messaging host into Arc
+claude-in-arc hud build    # optional Phase 2: build macOS notch HUD companion
+claude-in-arc hud install  # register HUD native-messaging host in Arc
+claude-in-arc hud open     # launch menu-bar HUD app (experimental)
 claude-in-arc reveal       # open the build folder in Finder
 claude-in-arc uninstall    # full rollback: remove build, restore backups, clear state
 ```

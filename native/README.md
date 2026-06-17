@@ -2,7 +2,7 @@
 
 Optional macOS companion that shows Claude chat in a **Dynamic Island–style notch overlay**, separate from the Arc extension patch.
 
-**Status:** Scaffold only — not wired to the extension yet.
+**Status:** M0 scaffold + M1 pill UI — extension wire-up in M2.
 
 ## Why a separate app?
 
@@ -31,18 +31,22 @@ native/
 - [x] Document architecture in `docs/DYNAMIC_ISLAND.md`
 - [x] Draft `schemas/hud-message-v1.json`
 - [x] SPM package skeleton with DynamicNotchKit
+- [x] `claude-in-arc hud build|install|open` CLI stub
+- [x] `NotchPillController` (DynamicNotchKit compact/expand)
 
 ### Phase 2-M1 — Notch shell
 
-- [ ] Xcode app target or `swift package` macOS executable with `MenuBarExtra`
-- [ ] Collapsed pill via DynamicNotchKit; expand on click/hover
-- [ ] Read notch geometry from `NSScreen.safeAreaInsets`
+- [x] MenuBarExtra + `LSUIElement` accessory policy
+- [x] Collapsed pill via DynamicNotchKit; expand on toggle
+- [x] Read notch geometry from `NSScreen.safeAreaInsets` / auxiliary areas
+- [ ] Hover-to-expand parity with agent-notch
 
 ### Phase 2-M2 — Native messaging host
 
-- [ ] Register host `com.claude-in-arc.hud` (name TBD) in `~/Library/Application Support/.../NativeMessagingHosts/`
-- [ ] `claude-in-arc` CLI subcommand: `claude-in-arc hud install` (mirror `link` pattern in `claude_in_arc/core.py`)
-- [ ] Patched extension background: optional `connectNative("com.claude-in-arc.hud")` when HUD mode enabled
+- [x] Host manifest template `com.claudeinarac.hud`
+- [x] `claude-in-arc hud install` (mirror `link` pattern)
+- [ ] Patched extension background: optional `connectNative("com.claudeinarac.hud")` when HUD mode enabled
+- [ ] Host ↔ app IPC (notifications or Unix socket)
 
 ### Phase 2-M3 — Chat surface
 

@@ -131,19 +131,31 @@ does not remove the OS window.
 
 ---
 
-### 9. Native macOS companion (notch / menu bar HUD) — **Medium / Phase 2**
+### 9. Native macOS companion (notch / menu bar HUD) — **Medium / Phase 2** ⭐ integrated Arc path
 
-MIT companion app in `native/ClaudeInArcHUD/`: `NSPanel` + DynamicNotchKit +
-`chrome.runtime.connectNative` to the patched extension.
+MIT companion app in `native/ClaudeInArcHUD/`: DynamicNotchKit collapsed pill +
+`NSPanel` expanded chat + `chrome.runtime.connectNative` to the patched extension.
+
+**Detailed design:** [notch-hud-integration.md](notch-hud-integration.md) ·
+[docs/DYNAMIC_ISLAND.md](../docs/DYNAMIC_ISLAND.md)
 
 | Pros | Cons |
 |------|------|
-| Novel UX; not fighting Arc window manager | **Separate install**; months of work |
-| MIT-safe (no boring.notch GPL fork) | Chat still not *inside* Arc window |
-| Scaffold exists | M3–M4: WebView, signing, notarization |
+| Feels **integrated** — borderless notch pill vs titled popup window | **Separate install** (extension + HUD app + manifest) |
+| User stays in Arc full-width (no split margin when HUD mode on) | Chat still not *inside* Arc's window frame |
+| MIT-safe (DynamicNotchKit; no boring.notch GPL fork) | M3–M4: WebView bridge, signing, multi-monitor polish |
+| Scaffold + `claude-in-arc hud build|install|open` | Extension `panel-mode hud` not wired until M2 |
 
-**Verdict:** Best **long-term differentiator** if users want “system HUD” instead
-of in-Arc chrome. See [DYNAMIC_ISLAND.md](../docs/DYNAMIC_ISLAND.md).
+**Verdict:** Best option for Arc users who want a **system HUD** instead of fighting
+the docked popup. Perceptually more integrated than split mode; technically still a
+sibling surface (like agent-notch / Ping Island for CLI agents, but bridged to the
+**browser extension** for page context).
+
+**Try today:**
+
+```bash
+claude-in-arc hud build && claude-in-arc hud open
+```
 
 ---
 
@@ -196,7 +208,7 @@ Requires The Browser Company to implement Chrome’s Side Panel API.
 | Priority | Experiment | Effort |
 |----------|------------|--------|
 | **P1** | AppleScript `tile` helper (snap Arc + popup) | ~1–2 days |
-| **P2** | Native HUD M1–M2 (`native/ClaudeInArcHUD`) | weeks |
+| **P2** | Native HUD M1–M2 (`claude-in-arc hud`, [notch-hud-integration.md](notch-hud-integration.md)) | 2–4 weeks |
 | **P3** | Arc feature request + Anthropic bridge allowlist | ongoing |
 
 ### Quick experiments **not** recommended
@@ -222,4 +234,4 @@ Requires The Browser Company to implement Chrome’s Side Panel API.
 
 - Community patches: [Dylanyz/claude-arc-patch](https://github.com/Dylanyz/claude-arc-patch), [Dhravya/arc-sidepanel-patch](https://github.com/Dhravya/arc-sidepanel-patch), [timeoio/claude-for-arc](https://github.com/timeoio/claude-for-arc)
 - Arc Split View (user docs): https://resources.arc.net/hc/en-us/articles/19335393146775
-- W3C split tabs (read-only): https://github.com/w3c/webextensions/blob/main/proposals/split_tabs_proposal.md
+- Native notch HUD design: [research/notch-hud-integration.md](research/notch-hud-integration.md)
