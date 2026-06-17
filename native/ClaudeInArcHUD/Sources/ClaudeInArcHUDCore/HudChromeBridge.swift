@@ -51,7 +51,7 @@ public final class HudChromeBridge: NSObject, WKScriptMessageHandler {
               let requestId = body[ProxyKey.requestId] as? String,
               let method = body[ProxyKey.method] as? String else { return }
 
-        let args = body[ProxyKey.args] as? [Any] ?? []
+        let args = plistSafeValue(body[ProxyKey.args] as? [Any] ?? []) as? [Any] ?? []
         NSLog("[ClaudeInArcHUD] hudChrome proxy request method=%@ id=%@", method, requestId)
         let info: [String: Any] = [
             ProxyKey.requestId: requestId,
@@ -80,11 +80,53 @@ public final class HudChromeBridge: NSObject, WKScriptMessageHandler {
         }
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let json = String(data: data, encoding: .utf8) else { return }
+              let json = String(data: data, encoding: .utf8) else {
+            NSLog("[ClaudeInArcHUD] hudChrome proxy response encode failed id=%@", requestId)
+            return
+        }
 
+        NSLog("[ClaudeInArcHUD] hudChrome proxy response id=%@", requestId)
         webView.evaluateJavaScript(
             "window.__claudeInArcHudChromeDispatch(\(json))",
-            completionHandler: nil
+            completionHandler: { _, error in
+                if let error {
+                    NSLog("[ClaudeInArcHUD] hudChrome dispatch failed id=%@ error=%@", requestId, error.localizedDescription)
+                }
+            }
         )
+    }
+
+    /// Distributed notifications require property-list types.
+    private func plistSafeValue(_ value: Any) -> Any {
+        switch value {
+        case is NSNull:
+            return NSNull()
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            return number
+        case let bool as Bool:
+            return bool
+        case let int as Int:
+            return int
+        case let double as Double:
+            return double
+        case let array as [Any]:
+            return array.map { plistSafeValue($0) }
+        case let dict as [String: Any]:
+            return dict.mapValues { plistSafeValue($0) }
+        case let array as NSArray:
+            return array.map { plistSafeValue($0) }
+        case let dict as NSDictionary:
+            var out: [String: Any] = [:]
+            for (key, val) in dict {
+                if let key = key as? String {
+                    out[key] = plistSafeValue(val)
+                }
+            }
+            return out
+        default:
+            return String(describing: value)
+        }
     }
 }

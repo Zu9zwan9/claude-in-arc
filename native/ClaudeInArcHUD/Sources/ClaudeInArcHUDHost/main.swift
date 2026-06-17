@@ -231,6 +231,10 @@ while let data = readMessage(from: stdin) {
     case "ping":
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "toggle_hud":
+        if let decoded, let tabId = decoded.tabId {
+            forwardToAppReliably(InboundMessage(type: "page_context", tabId: tabId, url: "", title: ""))
+        }
+        writeMessage(OutboundMessage(type: "request_page_context"), to: stdout)
         if let decoded { forwardToAppReliably(decoded) }
         writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
     case "set_collapsed":
@@ -246,7 +250,10 @@ while let data = readMessage(from: stdin) {
         if let decoded { forwardToApp(decoded) }
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "hud_chrome_response":
-        if let decoded { forwardProxyResponse(decoded) }
+        if let decoded {
+            stderr.write(Data("[ClaudeInArcHUDHost] hud_chrome_response id=\(decoded.requestId ?? "?")\n".utf8))
+            forwardProxyResponse(decoded)
+        }
     case "sidebar_state":
         ensureHudAppReady()
         if let decoded {

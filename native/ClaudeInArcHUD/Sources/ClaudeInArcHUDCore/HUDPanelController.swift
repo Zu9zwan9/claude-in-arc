@@ -162,10 +162,13 @@ public final class HUDPanelController: NSObject {
             NSLog("[ClaudeInArcHUD] loadBridge skipped — no webView")
             return
         }
-        var path = "claude-arc-hud-bridge.html"
-        if let tabId = pageTabId {
-            path += "?tabId=\(tabId)"
+        guard let tabId = pageTabId else {
+            NSLog("[ClaudeInArcHUD] loadBridge missing tabId — showing guidance")
+            setDebugStatus("No tab context")
+            loadMissingTabIdPage(in: webView)
+            return
         }
+        let path = "claude-arc-hud-bridge.html?tabId=\(tabId)"
         let urlString = "\(Self.bridgeScheme)://localhost/\(path)"
         guard let url = URL(string: urlString) else {
             NSLog("[ClaudeInArcHUD] loadBridge invalid url=%@", urlString)
@@ -173,9 +176,24 @@ public final class HUDPanelController: NSObject {
             showBridgeError("Internal error: invalid bridge URL.")
             return
         }
-        NSLog("[ClaudeInArcHUD] loadBridge url=%@ tabId=%@", urlString, pageTabId.map(String.init) ?? "nil")
+        NSLog("[ClaudeInArcHUD] loadBridge url=%@ tabId=%d", urlString, tabId)
         setDebugStatus("Loading bridge…")
         webView.load(URLRequest(url: url))
+    }
+
+    private func loadMissingTabIdPage(in webView: WKWebView) {
+        let html = """
+        <!doctype html>
+        <html lang="en"><head><meta charset="utf-8">
+        <style>
+        html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;
+        background:#1a1a1a;color:#ffb4b4;font:13px/1.4 system-ui,-apple-system,sans-serif;
+        text-align:center;padding:16px;}
+        </style></head><body>
+        <p>Open a tab in Arc and press ⌘E again.</p>
+        </body></html>
+        """
+        webView.loadHTMLString(html, baseURL: URL(string: "\(Self.bridgeScheme)://localhost/"))
     }
 
     private func makePanel(width: CGFloat, height: CGFloat) -> NSPanel {
@@ -261,6 +279,7 @@ public final class HUDPanelController: NSObject {
     private func bringPanelForward() {
         guard let panel else { return }
         positionBelowMenuBar(panel)
+        panel.becomesKeyOnlyIfNeeded = false
         panel.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
