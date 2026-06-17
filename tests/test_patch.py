@@ -587,5 +587,91 @@ class RollbackTests(unittest.TestCase):
         self.assertFalse(target.exists())
 
 
+class UpgradeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._orig_build_dir = core.BUILD_EXTENSION_DIR
+        self._orig_build_root = core.BUILD_ROOT
+        self._orig_verbosity = core._VERBOSITY
+        core.BUILD_ROOT = tmp / "ClaudeInArc"
+        core.BUILD_EXTENSION_DIR = core.BUILD_ROOT / "Claude-in-Arc-Extension"
+        core._VERBOSITY = 0
+
+    def tearDown(self):
+        core.BUILD_EXTENSION_DIR = self._orig_build_dir
+        core.BUILD_ROOT = self._orig_build_root
+        core._VERBOSITY = self._orig_verbosity
+        self._tmp.cleanup()
+
+    def test_find_tool_repo_root_from_package(self):
+        root = core._find_tool_repo_root()
+        self.assertIsNotNone(root)
+        self.assertTrue((root / "claude_in_arc" / "core.py").is_file())
+
+    def test_git_pull_dry_run(self):
+        repo = core._find_tool_repo_root()
+        self.assertIsNotNone(repo)
+        ok, msg = core._git_pull(repo, dry_run=True)
+        self.assertTrue(ok)
+        self.assertIn("dry-run", msg)
+
+    def test_verify_installed_shim_matches_asset(self):
+        core.BUILD_EXTENSION_DIR.mkdir(parents=True)
+        expected = core.shim_version_label()
+        (core.BUILD_EXTENSION_DIR / core.SHIM_FILENAME).write_text(
+            f'var SHIM_VERSION = "{expected}";\n', encoding="utf-8"
+        )
+        ok, detail = core._verify_installed_shim()
+        self.assertTrue(ok)
+        self.assertIn(expected, detail)
+
+    def test_verify_installed_shim_detects_mismatch(self):
+        core.BUILD_EXTENSION_DIR.mkdir(parents=True)
+        (core.BUILD_EXTENSION_DIR / core.SHIM_FILENAME).write_text(
+            'var SHIM_VERSION = "0.0.0";\n', encoding="utf-8"
+        )
+        ok, detail = core._verify_installed_shim()
+        self.assertFalse(ok)
+        self.assertIn("0.0.0", detail)
+
+    def test_upgrade_parser_registers_command(self):
+        parser = core.build_parser()
+        args = parser.parse_args(["upgrade", "--no-pull", "--no-reload", "--no-test-page"])
+        self.assertEqual(args.command, "upgrade")
+        self.assertTrue(args.no_pull)
+        self.assertTrue(args.no_reload)
+        self.assertTrue(args.no_test_page)
+
+    def test_cmd_upgrade_skips_pull_with_no_pull(self):
+        ext = make_fixture(Path(self._tmp.name) / "src")
+        source = core.SourceExtension(
+            core.Browser("fixture", "Fixture", ext.parent),
+            ext.name,
+            core._parse_version(ext.name) or (0,),
+            ext,
+        )
+        args = argparse.Namespace(
+            no_pull=True,
+            no_reload=True,
+            no_test_page=True,
+            dry_run=False,
+            source=None,
+            new_id=False,
+            allow_unverified=False,
+            ignore_conflict=True,
+            link=False,
+            panel_mode=None,
+            test_url="https://example.com",
+        )
+        with patch.object(core, "pick_source", return_value=source), patch.object(
+            core, "verify_official_source", return_value=core.OFFICIAL_EXTENSION_ID
+        ), patch.object(core, "_git_pull") as mock_pull:
+            rc = core.cmd_upgrade(args)
+        mock_pull.assert_not_called()
+        self.assertEqual(rc, core.EXIT_OK)
+        self.assertTrue(core.BUILD_EXTENSION_DIR.is_dir())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

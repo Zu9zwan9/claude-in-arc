@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.20"
+TOOL_VERSION = "1.2.21"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -1193,6 +1193,187 @@ def _reveal_in_finder(path: Path) -> bool:
         return False
 
 
+def _find_tool_repo_root() -> Optional[Path]:
+    """Best-effort locate the claude-in-arc git repository."""
+    candidates: List[Path] = []
+    env = os.environ.get("CLAUDE_IN_ARC_REPO")
+    if env:
+        candidates.append(Path(env).expanduser())
+    pkg = Path(__file__).resolve().parent.parent
+    candidates.append(pkg)
+    cwd = Path.cwd()
+    if cwd not in candidates:
+        candidates.append(cwd)
+
+    for root in candidates:
+        if (root / ".git").is_dir():
+            return root.resolve()
+
+    for start in (pkg, cwd):
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if r.returncode == 0:
+                return Path(r.stdout.strip()).resolve()
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def _git_pull(repo_root: Path, dry_run: bool = False) -> Tuple[bool, str]:
+    """Run git pull --ff-only in repo_root. Returns (success, message)."""
+    if dry_run:
+        return True, f"[dry-run] would run: git pull in {repo_root}"
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_root), "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "git pull failed").strip()
+        return False, msg
+    return True, (r.stdout or "Already up to date.").strip()
+
+
+def _read_installed_shim_version() -> Optional[str]:
+    """Return SHIM_VERSION from the installed patched build, if present."""
+    shim_path = BUILD_EXTENSION_DIR / SHIM_FILENAME
+    if not shim_path.is_file():
+        return None
+    try:
+        text = shim_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r'SHIM_VERSION\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
+def _verify_installed_shim() -> Tuple[bool, str]:
+    """Compare installed shim SHIM_VERSION to the bundled asset. Returns (ok, detail)."""
+    expected = shim_version_label()
+    installed = _read_installed_shim_version()
+    if installed is None:
+        return False, f"no SHIM_VERSION in {BUILD_EXTENSION_DIR / SHIM_FILENAME}"
+    if installed == expected:
+        return True, f"claude-arc-shim v{installed}"
+    return False, f"expected v{expected}, installed v{installed}"
+
+
+def _run_osascript(source: str, timeout: int = 30) -> Tuple[bool, str]:
+    """Run AppleScript via osascript. Returns (success, stdout or stderr)."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", source],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    out = (r.stdout or r.stderr or "").strip()
+    if r.returncode != 0:
+        return False, out or "osascript failed"
+    return True, out
+
+
+def _arc_click_reload_extension() -> Tuple[bool, str]:
+    """
+    Best-effort click Reload on the Claude unpacked extension card in Arc.
+
+    Requires macOS Accessibility permission for the calling terminal/IDE.
+    Returns (clicked, detail).
+    """
+    script = r'''
+tell application "Arc" to activate
+delay 1.5
+tell application "System Events"
+    if not (exists process "Arc") then return "no_arc_process"
+    tell process "Arc"
+        set frontmost to true
+        try
+            repeat with w in windows
+                try
+                    repeat with g in (groups of w)
+                        try
+                            set gText to (name of g as text)
+                            if gText contains "Claude" then
+                                repeat with b in (buttons of g)
+                                    if (name of b as text) is "Reload" then
+                                        click b
+                                        return "clicked"
+                                    end if
+                                end repeat
+                            end if
+                        end try
+                    end repeat
+                end try
+            end repeat
+        end try
+        try
+            repeat with b in (every button of window 1 whose name is "Reload")
+                click b
+                return "clicked_first_reload"
+            end repeat
+        end try
+        return "reload_not_found"
+    end tell
+end tell
+'''
+    ok, detail = _run_osascript(script)
+    if not ok and "not allowed assistive" in detail.lower():
+        return False, "accessibility_denied"
+    if ok and detail.startswith("clicked"):
+        return True, detail
+    return False, detail or "reload_not_found"
+
+
+def _open_url_in_arc(url: str) -> bool:
+    """Open a URL in Arc. Never raises."""
+    if not arc_installed():
+        return False
+    for cmd in (["open", "-a", "Arc", url], ["open", "-a", "Arc", "-n", url]):
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=15)
+            if r.returncode == 0:
+                debug("opened in Arc: " + url)
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def _arc_send_toggle_side_panel() -> Tuple[bool, str]:
+    """
+    Best-effort send ⌘E (toggle-side-panel) to the frontmost Arc window.
+
+    Requires Accessibility permission. Returns (sent, detail).
+    """
+    script = r'''
+tell application "Arc" to activate
+delay 0.75
+tell application "System Events"
+    if not (exists process "Arc") then return "no_arc_process"
+    tell process "Arc"
+        set frontmost to true
+        keystroke "e" using command down
+        return "sent"
+    end tell
+end tell
+'''
+    ok, detail = _run_osascript(script)
+    if not ok and "not allowed assistive" in detail.lower():
+        return False, "accessibility_denied"
+    return ok and detail == "sent", detail
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -1338,7 +1519,9 @@ def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> 
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    banner()
+    upgrade_mode = getattr(args, "_upgrade_mode", False)
+    if not upgrade_mode:
+        banner()
 
     if not arc_installed():
         warn("Arc isn't installed yet. I'll build the extension anyway; you'll need")
@@ -1425,11 +1608,144 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     opened_page = False
     revealed = False
-    if getattr(args, "open", True) and _VERBOSITY >= 1:
+    if not upgrade_mode and getattr(args, "open", True) and _VERBOSITY >= 1:
         opened_page = _open_arc_extensions()
         revealed = _reveal_in_finder(build.build_dir)
 
+    if upgrade_mode:
+        return EXIT_OK
+
     _print_next_steps(build, opened_page, revealed)
+    return EXIT_OK
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """
+    End-to-end upgrade: git pull → install → reload extension in Arc → smoke test.
+
+    Arc UI steps (Reload, ⌘E) are best-effort via AppleScript and may require
+    Accessibility permission for your terminal.
+    """
+    banner()
+    heading("Upgrade")
+
+    if not arc_installed():
+        warn("Arc isn't installed — install steps will still rebuild the extension.")
+
+    # 1) git pull (optional)
+    if not getattr(args, "no_pull", False):
+        repo = _find_tool_repo_root()
+        if repo is None:
+            warn("Not inside a claude-in-arc git repo — skipping git pull.")
+            detail("Set CLAUDE_IN_ARC_REPO or run from the repo, or pass --no-pull.")
+        else:
+            info(f"Pulling latest changes in {repo}")
+            pulled, msg = _git_pull(repo, dry_run=args.dry_run)
+            if pulled:
+                ok(msg if not args.dry_run else msg)
+            else:
+                fail(f"git pull failed: {msg}")
+                return EXIT_ERROR
+    else:
+        info("Skipping git pull (--no-pull).")
+
+    # 2) install / rebuild
+    heading("Rebuilding extension")
+    install_args = argparse.Namespace(
+        source=getattr(args, "source", None),
+        dry_run=args.dry_run,
+        new_id=getattr(args, "new_id", False),
+        allow_unverified=getattr(args, "allow_unverified", False),
+        ignore_conflict=getattr(args, "ignore_conflict", False),
+        open=False,
+        link=getattr(args, "link", True),
+        panel_mode=getattr(args, "panel_mode", None),
+        _upgrade_mode=True,
+    )
+    rc = cmd_install(install_args)
+    if rc != EXIT_OK:
+        return rc
+    if args.dry_run:
+        warn("Dry run — skipped Arc reload and verification.")
+        return EXIT_OK
+
+    problems = 0
+
+    # 3) Arc extensions → Reload
+    if not getattr(args, "no_reload", False):
+        heading("Reload in Arc")
+        if not arc_installed():
+            warn("Arc not installed — open arc://extensions manually and click Reload.")
+            problems += 1
+        elif _open_arc_extensions():
+            ok("Opened arc://extensions in Arc.")
+            clicked, detail = _arc_click_reload_extension()
+            if clicked:
+                ok("Clicked Reload on the Claude extension (best effort).")
+                detail_msg = detail.replace("_", " ")
+                if detail_msg != "clicked":
+                    detail(detail_msg)
+            elif detail == "accessibility_denied":
+                warn(
+                    "Could not click Reload — grant Accessibility to your terminal "
+                    "(System Settings → Privacy & Security → Accessibility)."
+                )
+                info("Manual step: on arc://extensions, click Reload on the Claude card.")
+                problems += 1
+            else:
+                warn("Could not find the Reload button automatically.")
+                info("Manual step: on arc://extensions, click Reload on the Claude card.")
+                if detail and detail != "reload_not_found":
+                    detail(detail)
+                problems += 1
+        else:
+            warn("Could not open arc://extensions in Arc.")
+            info("Manual step: Arc → arc://extensions → Reload on the Claude card.")
+            problems += 1
+    else:
+        info("Skipping Arc reload (--no-reload).")
+
+    # 4) Open test page + ⌘E
+    test_url = getattr(args, "test_url", "https://example.com")
+    if not getattr(args, "no_test_page", False) and test_url:
+        heading("Smoke test")
+        if _open_url_in_arc(test_url):
+            ok(f"Opened {test_url} in Arc.")
+        else:
+            warn(f"Could not open {test_url} in Arc.")
+            problems += 1
+
+        sent, detail = _arc_send_toggle_side_panel()
+        if sent:
+            ok("Sent ⌘E to toggle the Claude side panel (best effort).")
+        elif detail == "accessibility_denied":
+            warn("Could not send ⌘E — grant Accessibility to your terminal.")
+            info("Manual step: on a normal https:// page, press ⌘E or click the Claude icon.")
+            problems += 1
+        else:
+            warn("Could not send ⌘E automatically.")
+            info("Manual step: on a normal https:// page, press ⌘E or click the Claude icon.")
+            if detail:
+                detail(detail)
+            problems += 1
+
+        info("Service worker console should log:")
+        detail("[claude-in-arc] claude-arc-shim v…  (arc://extensions → Service worker → Inspect)")
+
+    # 5) Verify installed shim version
+    heading("Verify shim")
+    shim_ok, shim_detail = _verify_installed_shim()
+    if shim_ok:
+        ok(f"Installed shim matches bundled asset: {shim_detail}")
+    else:
+        fail(f"Shim verification failed: {shim_detail}")
+        problems += 1
+
+    say("")
+    if problems:
+        warn(f"{problems} step(s) need manual follow-up above.")
+        return EXIT_ERROR
+    ok("Upgrade complete.")
     return EXIT_OK
 
 
@@ -1995,6 +2311,44 @@ def build_parser() -> argparse.ArgumentParser:
     add_panel_mode(p_install)
     add_common(p_install)
     p_install.set_defaults(func=cmd_install, open=True, link=True)
+
+    p_upgrade = sub.add_parser(
+        "upgrade",
+        help="Pull latest tool, rebuild, reload in Arc, and verify the shim.",
+    )
+    p_upgrade.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Skip git pull (use when not in the claude-in-arc repo).",
+    )
+    p_upgrade.add_argument(
+        "--no-reload",
+        action="store_true",
+        help="Skip opening arc://extensions and clicking Reload.",
+    )
+    p_upgrade.add_argument(
+        "--no-test-page",
+        action="store_true",
+        help="Skip opening a test URL and sending ⌘E in Arc.",
+    )
+    p_upgrade.add_argument(
+        "--test-url",
+        default="https://example.com",
+        help="URL to open in Arc for the smoke test (default: https://example.com).",
+    )
+    p_upgrade.add_argument("--source", help="Path to an unpacked official extension to patch.")
+    p_upgrade.add_argument("--no-link", dest="link", action="store_false",
+                           help="Skip native-messaging mirroring.")
+    p_upgrade.add_argument(
+        "--ignore-conflict",
+        action="store_true",
+        help="Build even when Arc still has the Store copy active (not recommended).",
+    )
+    add_new_id(p_upgrade)
+    add_verify(p_upgrade)
+    add_panel_mode(p_upgrade)
+    add_common(p_upgrade)
+    p_upgrade.set_defaults(func=cmd_upgrade, link=True)
 
     p_build = sub.add_parser("build", help="Only (re)build the patched extension.")
     p_build.add_argument("--source", help="Path to an unpacked official extension to patch.")

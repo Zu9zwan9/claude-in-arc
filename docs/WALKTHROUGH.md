@@ -296,14 +296,26 @@ For Claude Desktop integration (side-panel chat works without this):
 Copy-paste when nothing works and you want a clean slate:
 
 ```bash
-# Update tool (one-liner install location)
-cd ~/.claude-in-arc && git pull
+# One command: pull tool updates, rebuild, reload in Arc, verify shim
+claude-in-arc upgrade
 
-# Rebuild from your installed official extension
+# Or step-by-step:
+cd ~/Projects/claude-in-arc && git pull
 claude-in-arc install
 ```
 
-In Arc (`arc://extensions`):
+**`claude-in-arc upgrade`** runs `git pull` (when run from the tool repo),
+rebuilds via `install`, opens `arc://extensions`, attempts to click **Reload**
+via AppleScript, opens a test page (default `https://example.com`), sends **⌘E**,
+and checks that the installed shim's `SHIM_VERSION` matches the bundled asset.
+
+Arc UI automation needs **Accessibility** permission for your terminal (System
+Settings → Privacy & Security → Accessibility). If Reload or ⌘E cannot be
+automated, the command prints a one-line manual step and still verifies the shim.
+
+Flags: `--no-pull`, `--no-reload`, `--no-test-page`, `--test-url URL`.
+
+In Arc (`arc://extensions`) if upgrade did not click Reload:
 
 1. **Remove** any Store "Claude" entry
 2. **Load unpacked** → `~/Library/Application Support/ClaudeInArc/Claude-in-Arc-Extension`
