@@ -1289,40 +1289,53 @@ def _arc_click_reload_extension() -> Tuple[bool, str]:
     Best-effort click Reload on the Claude unpacked extension card in Arc.
 
     Requires macOS Accessibility permission for the calling terminal/IDE.
+    Arc's arc://extensions page is Chromium web UI; Reload buttons usually have
+    no AX label, so this often returns reload_not_found — click Reload manually.
+
     Returns (clicked, detail).
     """
     script = r'''
+on buttonLabel(b)
+    try
+        set d to description of b
+        if d is not missing value and (d as text) is not "missing value" and (d as text) is not "" then return d as text
+    end try
+    try
+        set t to title of b
+        if t is not missing value and (t as text) is not "missing value" and (t as text) is not "" then return t as text
+    end try
+    try
+        set v to value of b
+        if v is not missing value and (v as text) is not "missing value" and (v as text) is not "" then return v as text
+    end try
+    try
+        set n to name of b
+        if n is not missing value and (n as text) is not "missing value" and (n as text) is not "" then return n as text
+    end try
+    return ""
+end buttonLabel
+
 tell application "Arc" to activate
-delay 1.5
+delay 2.5
 tell application "System Events"
     if not (exists process "Arc") then return "no_arc_process"
     tell process "Arc"
         set frontmost to true
-        try
-            repeat with w in windows
-                try
-                    repeat with g in (groups of w)
-                        try
-                            set gText to (name of g as text)
-                            if gText contains "Claude" then
-                                repeat with b in (buttons of g)
-                                    if (name of b as text) is "Reload" then
-                                        click b
-                                        return "clicked"
-                                    end if
-                                end repeat
+        repeat with w in windows
+            if (name of w as text) contains "Extension" then
+                repeat with g in groups of w
+                    try
+                        repeat with b in buttons of g
+                            set lbl to my buttonLabel(b)
+                            if lbl is "Reload" or lbl contains "Reload" then
+                                click b
+                                return "clicked_first_reload"
                             end if
-                        end try
-                    end repeat
-                end try
-            end repeat
-        end try
-        try
-            repeat with b in (every button of window 1 whose name is "Reload")
-                click b
-                return "clicked_first_reload"
-            end repeat
-        end try
+                        end repeat
+                    end try
+                end repeat
+            end if
+        end repeat
         return "reload_not_found"
     end tell
 end tell
@@ -1679,13 +1692,13 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
             problems += 1
         elif _open_arc_extensions():
             ok("Opened arc://extensions in Arc.")
-            clicked, detail = _arc_click_reload_extension()
+            clicked, reload_detail = _arc_click_reload_extension()
             if clicked:
                 ok("Clicked Reload on the Claude extension (best effort).")
-                detail_msg = detail.replace("_", " ")
-                if detail_msg != "clicked":
-                    detail(detail_msg)
-            elif detail == "accessibility_denied":
+                reload_msg = reload_detail.replace("_", " ")
+                if reload_msg != "clicked":
+                    detail(reload_msg)
+            elif reload_detail == "accessibility_denied":
                 warn(
                     "Could not click Reload — grant Accessibility to your terminal "
                     "(System Settings → Privacy & Security → Accessibility)."
@@ -1694,9 +1707,12 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
                 problems += 1
             else:
                 warn("Could not find the Reload button automatically.")
-                info("Manual step: on arc://extensions, click Reload on the Claude card.")
-                if detail and detail != "reload_not_found":
-                    detail(detail)
+                info(
+                    "Manual step: on arc://extensions, click Reload on the Claude card "
+                    "(Arc's extensions page does not expose Reload to Accessibility)."
+                )
+                if reload_detail and reload_detail != "reload_not_found":
+                    detail(reload_detail)
                 problems += 1
         else:
             warn("Could not open arc://extensions in Arc.")
@@ -1715,18 +1731,18 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
             warn(f"Could not open {test_url} in Arc.")
             problems += 1
 
-        sent, detail = _arc_send_toggle_side_panel()
+        sent, toggle_detail = _arc_send_toggle_side_panel()
         if sent:
             ok("Sent ⌘E to toggle the Claude side panel (best effort).")
-        elif detail == "accessibility_denied":
+        elif toggle_detail == "accessibility_denied":
             warn("Could not send ⌘E — grant Accessibility to your terminal.")
             info("Manual step: on a normal https:// page, press ⌘E or click the Claude icon.")
             problems += 1
         else:
             warn("Could not send ⌘E automatically.")
             info("Manual step: on a normal https:// page, press ⌘E or click the Claude icon.")
-            if detail:
-                detail(detail)
+            if toggle_detail:
+                detail(toggle_detail)
             problems += 1
 
         info("Service worker console should log:")

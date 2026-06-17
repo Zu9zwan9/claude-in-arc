@@ -311,8 +311,10 @@ via AppleScript, opens a test page (default `https://example.com`), sends **⌘E
 and checks that the installed shim's `SHIM_VERSION` matches the bundled asset.
 
 Arc UI automation needs **Accessibility** permission for your terminal (System
-Settings → Privacy & Security → Accessibility). If Reload or ⌘E cannot be
-automated, the command prints a one-line manual step and still verifies the shim.
+Settings → Privacy & Security → Accessibility). **Reload** on `arc://extensions`
+is usually **not** auto-clickable — Chromium does not expose those web buttons to
+macOS Accessibility — so upgrade prints a one-line manual step. **⌘E** on a normal
+page often works when Accessibility is granted. The command still verifies the shim.
 
 Flags: `--no-pull`, `--no-reload`, `--no-test-page`, `--test-url URL`.
 

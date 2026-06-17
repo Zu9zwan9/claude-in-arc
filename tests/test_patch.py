@@ -675,6 +675,38 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(rc, core.EXIT_OK)
         self.assertTrue(core.BUILD_EXTENSION_DIR.is_dir())
 
+    def test_cmd_upgrade_reload_path_does_not_shadow_detail_helper(self):
+        """Regression: reload/toggle detail strings must not shadow detail()."""
+        ext = make_fixture(Path(self._tmp.name) / "src")
+        source = core.SourceExtension(
+            core.Browser("fixture", "Fixture", ext.parent),
+            ext.name,
+            core._parse_version(ext.name) or (0,),
+            ext,
+        )
+        args = argparse.Namespace(
+            no_pull=True,
+            no_reload=False,
+            no_test_page=False,
+            dry_run=False,
+            source=None,
+            new_id=False,
+            allow_unverified=False,
+            ignore_conflict=True,
+            link=False,
+            panel_mode=None,
+            test_url="https://example.com",
+        )
+        with patch.object(core, "pick_source", return_value=source), patch.object(
+            core, "verify_official_source", return_value=core.OFFICIAL_EXTENSION_ID
+        ), patch.object(core, "_open_arc_extensions", return_value=True), patch.object(
+            core, "_arc_click_reload_extension", return_value=(False, "reload_not_found")
+        ), patch.object(core, "_open_url_in_arc", return_value=True), patch.object(
+            core, "_arc_send_toggle_side_panel", return_value=(True, "sent")
+        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.22")):
+            rc = core.cmd_upgrade(args)
+        self.assertEqual(rc, core.EXIT_ERROR)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
