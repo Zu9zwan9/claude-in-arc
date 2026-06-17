@@ -286,7 +286,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.28")
+        self.assertEqual(core.shim_version_label(), "1.2.29")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))
@@ -741,7 +741,7 @@ class UpgradeTests(unittest.TestCase):
             core, "_arc_click_reload_extension", return_value=(False, "reload_not_found")
         ), patch.object(core, "_open_url_in_arc", return_value=True), patch.object(
             core, "_arc_send_toggle_side_panel", return_value=(True, "sent")
-        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.28")):
+        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.29")):
             rc = core.cmd_upgrade(args)
         self.assertEqual(rc, core.EXIT_ERROR)
 
@@ -764,6 +764,24 @@ class HudCliTests(unittest.TestCase):
         result = core.build_hud(dry_run=True)
         self.assertEqual(result.status, "dry-run")
         self.assertIn("swift build", result.message)
+
+    def test_ensure_hud_stack_dry_run(self):
+        ok, msg = core.ensure_hud_stack(dry_run=True)
+        self.assertTrue(ok)
+        self.assertIn("dry-run", msg)
+
+    @patch.object(core, "build_hud")
+    @patch.object(core, "install_hud_manifest")
+    def test_ensure_hud_stack_builds_and_installs(self, mock_install, mock_build):
+        pkg = core._hud_package_dir()
+        self.assertIsNotNone(pkg)
+        host = core._hud_host_binary(pkg)
+        mock_build.return_value = core.HudBuildResult(status="built", binary=host)
+        mock_install.return_value = core.HudInstallResult(status="installed", binary=host)
+        ok, msg = core.ensure_hud_stack(dry_run=False)
+        self.assertTrue(ok)
+        mock_build.assert_called_once()
+        mock_install.assert_called_once()
 
 
 if __name__ == "__main__":

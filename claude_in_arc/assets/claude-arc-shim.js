@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.28";
+  var SHIM_VERSION = "1.2.29";
 
   function log() {
     try {
@@ -463,11 +463,18 @@
     hudReady = false;
   }
 
+  function notifyHudConnectFailure(message) {
+    warn(message);
+    notifyOpenFailure(message);
+  }
+
   function ensureHudPort() {
     if (!isServiceWorkerContext() || !isHudMode()) return null;
     if (hudPort) return hudPort;
     if (!chrome.runtime.connectNative) {
-      warn("HUD mode: chrome.runtime.connectNative unavailable");
+      notifyHudConnectFailure(
+        "HUD native messaging unavailable. Run: claude-in-arc hud install, then Reload arc://extensions."
+      );
       return null;
     }
     try {
@@ -478,7 +485,11 @@
       hudPort.onDisconnect.addListener(function () {
         var err = chrome.runtime.lastError;
         if (err) {
-          warn("HUD native port disconnected:", err.message || String(err));
+          notifyHudConnectFailure(
+            "HUD disconnected: " +
+              (err.message || String(err)) +
+              ". Run: claude-in-arc hud build && claude-in-arc hud install, then Reload."
+          );
         } else {
           splitDebug("native port disconnected");
         }
@@ -486,9 +497,16 @@
         hudReady = false;
       });
       splitDebug("connected native host " + HUD_HOST_NAME);
+      log("connectNative(" + HUD_HOST_NAME + ") ok");
       return hudPort;
     } catch (e) {
-      warn("connectNative(" + HUD_HOST_NAME + ") failed:", e && e.message ? e.message : String(e));
+      notifyHudConnectFailure(
+        "connectNative(" +
+          HUD_HOST_NAME +
+          ") failed: " +
+          (e && e.message ? e.message : String(e)) +
+          ". Run: claude-in-arc hud build && claude-in-arc hud install, then Reload."
+      );
       hudPort = null;
       return null;
     }

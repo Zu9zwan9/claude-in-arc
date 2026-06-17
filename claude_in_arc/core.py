@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.28"
+TOOL_VERSION = "1.2.29"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -1127,18 +1127,71 @@ def install_hud_manifest(dry_run: bool = False, release: bool = False) -> HudIns
     return HudInstallResult(status="installed", target=target, binary=binary)
 
 
-def open_hud_app(release: bool = False) -> bool:
+def _quit_running_hud_app() -> bool:
+    """Signal a running ClaudeInArcHUD menu-bar app to exit. Returns True if one was running."""
+    try:
+        r = subprocess.run(
+            ["pkill", "-x", "ClaudeInArcHUD"],
+            capture_output=True,
+            timeout=5,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _resolve_claude_in_arc_launcher() -> Optional[Path]:
+    """Best-effort path to the claude-in-arc launcher on PATH."""
+    try:
+        r = subprocess.run(
+            ["which", "claude-in-arc"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    path = Path(r.stdout.strip()).expanduser()
+    return path.resolve() if path.is_file() else None
+
+
+def ensure_hud_stack(dry_run: bool = False, release: bool = False) -> Tuple[bool, str]:
+    """Build HUD binaries and register the native-messaging host manifest."""
+    if dry_run:
+        pkg = _hud_package_dir()
+        host = _hud_host_binary(pkg, release=release) if pkg else None
+        return True, f"[dry-run] would build HUD and install manifest ({host})"
+
+    built = build_hud(dry_run=False, release=release)
+    if built.status != "built":
+        return False, built.message or "hud build failed"
+
+    installed = install_hud_manifest(dry_run=False, release=release)
+    if installed.status not in ("installed", "already"):
+        return False, f"hud install failed: {installed.status}"
+    return True, str(built.binary or installed.binary or "")
+
+
+def open_hud_app(release: bool = False, rebuild: bool = True, restart: bool = True) -> bool:
+    """Launch ClaudeInArcHUD from the repo's swift build output (always rebuild by default)."""
     pkg = _hud_package_dir()
     if pkg is None:
         return False
-    binary = _hud_app_binary(pkg, release=release)
-    if not binary.is_file():
+
+    if rebuild:
         built = build_hud(dry_run=False, release=release)
         if built.status != "built":
             return False
-        binary = _hud_app_binary(pkg, release=release)
+
+    binary = _hud_app_binary(pkg, release=release)
     if not binary.is_file():
         return False
+
+    if restart and _quit_running_hud_app():
+        time.sleep(0.35)
+
     try:
         subprocess.Popen([str(binary.resolve())], start_new_session=True)
         return True
@@ -1817,6 +1870,20 @@ def cmd_install(args: argparse.Namespace) -> int:
             info("Claude Desktop integration isn't set up yet — the chat works without it.")
             detail("Enable the browser extension in Claude Desktop, then run: claude-in-arc link")
 
+    if build.panel_mode == "hud":
+        heading("HUD native host")
+        hud_ok, hud_detail = ensure_hud_stack(dry_run=args.dry_run)
+        if hud_ok:
+            ok("Built and registered HUD native-messaging host.")
+            if hud_detail and not hud_detail.startswith("[dry-run]"):
+                detail(hud_detail)
+            if not args.dry_run and open_hud_app(release=False):
+                ok("Launched menu-bar HUD app from repo build.")
+        else:
+            warn("HUD setup incomplete.")
+            detail(hud_detail)
+            detail("Run: claude-in-arc hud build && claude-in-arc hud install && claude-in-arc hud open")
+
     opened_page = False
     revealed = False
     if not upgrade_mode and getattr(args, "open", True) and _VERBOSITY >= 1:
@@ -1876,6 +1943,21 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     rc = cmd_install(install_args)
     if rc != EXIT_OK:
         return rc
+
+    panel_mode = getattr(args, "panel_mode", None) or _panel_mode_from_state()
+    if _normalize_panel_mode(panel_mode) == "hud":
+        heading("Building HUD")
+        hud_ok, hud_detail = ensure_hud_stack(dry_run=args.dry_run)
+        if hud_ok:
+            ok("Built and registered HUD native-messaging host.")
+            if hud_detail and not hud_detail.startswith("[dry-run]"):
+                detail(hud_detail)
+            if not args.dry_run and open_hud_app(release=False):
+                ok("Relaunched menu-bar HUD app from repo build.")
+        else:
+            warn("HUD build/install failed during upgrade.")
+            detail(hud_detail)
+
     if args.dry_run:
         warn("Dry run — skipped Arc reload and verification.")
         return EXIT_OK
@@ -2038,13 +2120,25 @@ def cmd_hud(args: argparse.Namespace) -> int:
 
     if action == "open":
         heading("Launching Claude-in-Arc HUD")
+        pkg = _hud_package_dir()
+        if pkg:
+            app_bin = _hud_app_binary(pkg, release=args.release)
+            detail(f"tool v{TOOL_VERSION}")
+            launcher = _resolve_claude_in_arc_launcher()
+            if launcher:
+                detail(f"launcher: {launcher}")
+            else:
+                detail("launcher: claude-in-arc not found on PATH")
         if args.dry_run:
-            pkg = _hud_package_dir()
             if pkg:
-                info(f"[dry-run] would launch {_hud_app_binary(pkg, release=args.release)}")
+                info(f"[dry-run] would build and launch {app_bin}")
             return EXIT_OK
-        if open_hud_app(release=args.release):
-            ok("Launched menu-bar HUD app.")
+        if open_hud_app(release=args.release, rebuild=True, restart=True):
+            if pkg:
+                ok("Built and launched menu-bar HUD app.")
+                detail(str(_hud_app_binary(pkg, release=args.release)))
+            else:
+                ok("Launched menu-bar HUD app.")
             return EXIT_OK
         fail("Could not launch HUD. Run: claude-in-arc hud build")
         return EXIT_ERROR

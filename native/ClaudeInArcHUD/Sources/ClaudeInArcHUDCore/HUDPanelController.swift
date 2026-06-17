@@ -9,6 +9,7 @@ public final class HUDPanelController: NSObject {
     public static let defaultHeight: CGFloat = 520
     private static let bridgeScheme = "claude-in-arc-ext"
     private static let panelLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 2)
+    private static let tabContextRetryDelays: [TimeInterval] = [0.35, 0.5, 0.8]
 
     private var panel: NSPanel?
     private var webView: WKWebView?
@@ -17,6 +18,7 @@ public final class HUDPanelController: NSObject {
     private var extensionRoot: URL?
     private var debugLabel: NSTextField?
     private var navigationDelegate: PanelNavigationDelegate?
+    private var tabContextRetryGeneration = 0
 
     public private(set) var pageTitle = ""
     public private(set) var pageURL = ""
@@ -164,11 +166,14 @@ public final class HUDPanelController: NSObject {
             return
         }
         guard let tabId = pageTabId else {
-            NSLog("[ClaudeInArcHUD] loadBridge missing tabId — showing guidance")
-            setDebugStatus("No tab context")
-            loadMissingTabIdPage(in: webView)
+            scheduleTabContextRetry(in: webView)
             return
         }
+        tabContextRetryGeneration += 1
+        loadBridge(withTabId: tabId, in: webView)
+    }
+
+    private func loadBridge(withTabId tabId: Int, in webView: WKWebView) {
         let path = "claude-arc-hud-bridge.html?tabId=\(tabId)"
         let urlString = "\(Self.bridgeScheme)://localhost/\(path)"
         guard let url = URL(string: urlString) else {
@@ -180,6 +185,49 @@ public final class HUDPanelController: NSObject {
         NSLog("[ClaudeInArcHUD] loadBridge url=%@ tabId=%d", urlString, tabId)
         setDebugStatus("Loading bridge…")
         webView.load(URLRequest(url: url))
+    }
+
+    private func scheduleTabContextRetry(in webView: WKWebView) {
+        tabContextRetryGeneration += 1
+        let generation = tabContextRetryGeneration
+        NSLog("[ClaudeInArcHUD] loadBridge missing tabId — waiting for page_context")
+        setDebugStatus("Waiting for tab context…")
+
+        func attempt(_ index: Int) {
+            guard generation == tabContextRetryGeneration, pageTabId == nil else { return }
+            if let tabId = pageTabId {
+                loadBridge(withTabId: tabId, in: webView)
+                return
+            }
+            if index >= Self.tabContextRetryDelays.count {
+                applyArcFrontTabFallback()
+                NSLog("[ClaudeInArcHUD] loadBridge missing tabId — showing guidance")
+                setDebugStatus("No tab context")
+                loadMissingTabIdPage(in: webView)
+                return
+            }
+            let delay = Self.tabContextRetryDelays[index]
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, generation == self.tabContextRetryGeneration else { return }
+                if let tabId = self.pageTabId {
+                    self.loadBridge(withTabId: tabId, in: webView)
+                    return
+                }
+                attempt(index + 1)
+            }
+        }
+        attempt(0)
+    }
+
+    private func applyArcFrontTabFallback() {
+        guard pageTabId == nil, let snapshot = ArcFrontTabResolver.snapshot() else { return }
+        NSLog(
+            "[ClaudeInArcHUD] Arc AppleScript fallback url=%@ title=%@",
+            snapshot.url,
+            snapshot.title.isEmpty ? "(pending)" : snapshot.title
+        )
+        if pageURL.isEmpty { pageURL = snapshot.url }
+        if pageTitle.isEmpty { pageTitle = snapshot.title }
     }
 
     private func loadMissingTabIdPage(in webView: WKWebView) {

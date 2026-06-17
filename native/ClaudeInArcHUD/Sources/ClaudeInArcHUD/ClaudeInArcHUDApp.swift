@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSLog("[ClaudeInArcHUD] started build=%@", HudBuildInfo.label)
         pill.showCollapsed()
         hudObserver = DistributedNotificationCenter.default().addObserver(
             forName: HudMessageBus.notificationName,
