@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.20";
+  var SHIM_VERSION = "1.2.22";
 
   function log() {
     try {
@@ -242,7 +242,10 @@
   var SPLIT_POPUP_DELAY_MS = 50;
   var SPLIT_POPUP_SYNC_MS = 120;
   // macOS Arc often ignores the first windows.update after create — retry gutter alignment.
-  var SPLIT_BOUNDS_RETRY_DELAYS_MS = [0, 50, 150];
+  var SPLIT_BOUNDS_RETRY_DELAYS_MS = [0, 50, 150, 300, 500, 1000];
+  var SPLIT_ANCHOR_WAIT_ATTEMPTS = 6;
+  var SPLIT_ANCHOR_WAIT_MS = 40;
+  var SPLIT_DOCK_ALIGN_TOLERANCE_PX = 12;
   var SPLIT_INJECT_SETTLE_MS = 16;
   var SPLIT_HIDE_GUARD_MS = 500;
   var splitLastShowAt = 0;
@@ -435,7 +438,8 @@
   function notifyArcSplitPanelHint() {
     if (!isArcBrowser()) return;
     var text =
-      "Claude opens in a narrow panel beside your page — drag Arc wider if needed.";
+      "Arc cannot embed Claude inside the browser. A narrow window docks beside " +
+      "your page (page should shrink left). Drag Arc wider if needed.";
     if (!chrome.storage || !chrome.storage.local) return;
     try {
       chrome.storage.local.get([ARC_SPLIT_HINT_NOTIFIED_KEY], function (stored) {
@@ -985,51 +989,135 @@
     });
   }
 
-  function tryOpenSplitDockedPopup(url, tabId, callback) {
+  function splitBoundsReady() {
     var bounds = getPanelBoundsSync();
-    if (bounds.left == null || bounds.top == null) {
-      warn(
-        "split popup: anchor bounds unavailable — will open floating panel and retry dock"
-      );
-    }
-    log(
-      "split dock target @" +
-        (bounds.left != null ? bounds.left : "?") +
-        "," +
-        (bounds.top != null ? bounds.top : "?") +
-        " " +
-        bounds.width +
-        "x" +
-        bounds.height
-    );
-    createPanelWindow(url, "popup", function (ok) {
-      if (ok) {
-        syncSplitPopupToGutter(tabId, function () {
-          if (callback) callback(true);
-        });
+    return bounds.left != null && bounds.top != null;
+  }
+
+  function waitForSplitAnchorBounds(tabId, attempt, callback) {
+    resolveSplitAnchorForTab(tabId, function (anchor) {
+      if (anchor) setActiveAnchor(anchor);
+      if (splitBoundsReady()) {
+        callback(true);
         return;
       }
-      if (shouldSkipNormalWindowFallback()) {
+      if (attempt >= SPLIT_ANCHOR_WAIT_ATTEMPTS) {
         warn(
-          "split popup failed on Arc; skipping type=normal (opens blank arc://new-tab-page/)"
+          "split popup: anchor bounds still unavailable after " +
+            SPLIT_ANCHOR_WAIT_ATTEMPTS +
+            " attempts"
         );
-        notifyOpenFailure(
-          "Could not open Claude split panel. Run: claude-in-arc install, then Reload in arc://extensions."
-        );
-        if (callback) callback(false);
+        callback(false);
         return;
       }
-      log("split popup window failed; retrying as type=normal");
-      createPanelWindow(url, "normal", function (ok2) {
-        if (!ok2) {
+      setTimeout(function () {
+        waitForSplitAnchorBounds(tabId, attempt + 1, callback);
+      }, SPLIT_ANCHOR_WAIT_MS * (attempt + 1));
+    });
+  }
+
+  function refocusAnchorWindowAfterDock() {
+    if (memAnchorWindowId == null) return;
+    try {
+      chrome.windows.update(memAnchorWindowId, { focused: true }, function () {
+        void chrome.runtime.lastError;
+      });
+    } catch (_e) {
+      /* no-op */
+    }
+  }
+
+  function verifySplitDockAlignment(windowId, expectedBounds, callback) {
+    if (windowId == null || expectedBounds.left == null) {
+      if (callback) callback(false);
+      return;
+    }
+    try {
+      chrome.windows.get(windowId, function (win) {
+        void chrome.runtime.lastError;
+        if (!win || win.left == null) {
+          if (callback) callback(true);
+          return;
+        }
+        var delta = Math.abs(win.left - expectedBounds.left);
+        var aligned = delta <= SPLIT_DOCK_ALIGN_TOLERANCE_PX;
+        if (!aligned) {
+          warn(
+            "split popup misaligned by " +
+              delta +
+              "px (expected left=" +
+              expectedBounds.left +
+              ", got " +
+              win.left +
+              ")"
+          );
+        }
+        if (callback) callback(aligned);
+      });
+    } catch (_e2) {
+      if (callback) callback(false);
+    }
+  }
+
+  function notifySplitMisaligned() {
+    notifyOpenFailure(
+      "Claude panel could not dock flush to Arc. Focus the Arc window and press ⌘E again, " +
+        "or run: claude-in-arc upgrade"
+    );
+  }
+
+  function tryOpenSplitDockedPopup(url, tabId, callback) {
+    waitForSplitAnchorBounds(tabId, 0, function (anchorReady) {
+      var bounds = getPanelBoundsSync();
+      if (!anchorReady || bounds.left == null || bounds.top == null) {
+        warn(
+          "split popup: anchor bounds unavailable — opening floating panel and retrying dock"
+        );
+        notifySplitDegraded(
+          "Split panel: could not read Arc window position — page margin may be missing"
+        );
+      }
+      log(
+        "split dock target @" +
+          (bounds.left != null ? bounds.left : "?") +
+          "," +
+          (bounds.top != null ? bounds.top : "?") +
+          " " +
+          bounds.width +
+          "x" +
+          bounds.height
+      );
+      createPanelWindow(url, "popup", function (ok) {
+        if (ok) {
+          syncSplitPopupToGutter(tabId, function () {
+            refocusAnchorWindowAfterDock();
+            if (callback) callback(true);
+          });
+          return;
+        }
+        if (shouldSkipNormalWindowFallback()) {
+          warn(
+            "split popup failed on Arc; skipping type=normal (opens blank arc://new-tab-page/)"
+          );
           notifyOpenFailure(
             "Could not open Claude split panel. Run: claude-in-arc install, then Reload in arc://extensions."
           );
           if (callback) callback(false);
           return;
         }
-        syncSplitPopupToGutter(tabId, function () {
-          if (callback) callback(true);
+        log("split popup window failed; retrying as type=normal");
+        createPanelWindow(url, "normal", function (ok2) {
+          if (!ok2) {
+            notifyOpenFailure(
+              "Could not open Claude split panel. Run: claude-in-arc install, then Reload in arc://extensions."
+            );
+            if (callback) callback(false);
+            return;
+          }
+          syncSplitPopupToGutter(tabId, function () {
+            refocusAnchorWindowAfterDock();
+            if (callback) callback(true);
+          });
         });
       });
     });
@@ -1117,6 +1205,18 @@
       remaining--;
       if (remaining <= 0) {
         splitBoundsSyncInFlight = false;
+        if (memPanelWindowId != null && cachedAnchorWindow) {
+          var expected = splitGutterBoundsForPanel(cachedAnchorWindow);
+          verifySplitDockAlignment(memPanelWindowId, expected, function (aligned) {
+            if (!aligned) {
+              notifySplitMisaligned();
+            }
+            refocusAnchorWindowAfterDock();
+            if (callback) callback();
+          });
+          return;
+        }
+        refocusAnchorWindowAfterDock();
         if (callback) callback();
       }
     }
@@ -1156,7 +1256,8 @@
   function syncSplitPopupToGutter(tabId, callback) {
     resolveSplitAnchorForTab(tabId, function (anchor) {
       if (anchor) setActiveAnchor(anchor);
-      scheduleSplitBoundsRetries(tabId, memPanelWindowId, callback);
+      scheduleSplitBoundsRetries(tabId, memPanelWindowId, null);
+      if (callback) callback();
     });
   }
 
@@ -1843,6 +1944,14 @@
       if (chrome.windows.onFocusChanged) {
         chrome.windows.onFocusChanged.addListener(function (windowId) {
           if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+          if (
+            isSplitDockMode() &&
+            memPanelWindowId != null &&
+            memSplitTabId != null &&
+            (windowId === memPanelWindowId || windowId === memAnchorWindowId)
+          ) {
+            syncSplitPopupToGutter(memSplitTabId, function () {});
+          }
           try {
             chrome.windows.get(windowId, function (win) {
               void chrome.runtime.lastError;
@@ -1857,8 +1966,13 @@
       }
       if (chrome.windows.onBoundsChanged) {
         chrome.windows.onBoundsChanged.addListener(function (windowId) {
-          if (windowId === memPanelWindowId) return;
           try {
+            if (windowId === memPanelWindowId) {
+              if (isSplitDockMode() && memSplitTabId != null) {
+                syncSplitPopupToGutter(memSplitTabId, function () {});
+              }
+              return;
+            }
             chrome.windows.get(windowId, function (win) {
               void chrome.runtime.lastError;
               if (isOurPanelWindow(win)) return;
@@ -1946,7 +2060,7 @@
       type: windowType,
       width: bounds.width,
       height: bounds.height,
-      focused: true,
+      focused: !(splitDock && windowType === "popup"),
     };
     if (bounds.left != null) createOpts.left = bounds.left;
     if (bounds.top != null) createOpts.top = bounds.top;
@@ -2273,13 +2387,14 @@
             panelOpenInFlight ||
             panelCreatePending ||
             splitBoundsSyncInFlight;
-          if (memSplitTabId != null && !replacingPanel) {
+          var withinHideGuard = shouldSuppressSplitHide(memSplitTabId, false);
+          if (memSplitTabId != null && !replacingPanel && !withinHideGuard) {
             hideSplitOnTab(memSplitTabId, function (hidden) {
               if (hidden) memSplitTabId = null;
             });
-          } else if (replacingPanel) {
+          } else if (replacingPanel || withinHideGuard) {
             log(
-              "panel window removed during open; keeping split margin tabId=" +
+              "panel window removed during open/guard; keeping split margin tabId=" +
                 memSplitTabId
             );
           }

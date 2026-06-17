@@ -245,6 +245,9 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_BOUNDS_RETRY_DELAYS_MS", shim)
         self.assertIn("scheduleSplitBoundsRetries", shim)
         self.assertIn("splitBoundsSyncInFlight", shim)
+        self.assertIn("waitForSplitAnchorBounds", shim)
+        self.assertIn("verifySplitDockAlignment", shim)
+        self.assertIn("refocusAnchorWindowAfterDock", shim)
         split_host = core.SPLIT_HOST_SOURCE.read_text(encoding="utf-8")
         self.assertIn("background:transparent", split_host)
 
@@ -256,7 +259,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.20")
+        self.assertEqual(core.shim_version_label(), "1.2.22")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))

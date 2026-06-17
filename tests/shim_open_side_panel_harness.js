@@ -148,6 +148,10 @@ function makeChrome(opts) {
         const win = {
           id,
           type: createOpts.type,
+          left: createOpts.left,
+          top: createOpts.top,
+          width: createOpts.width,
+          height: createOpts.height,
           tabs: [{ id: tabId, url: createOpts.url }],
         };
         wins[id] = win;
@@ -191,6 +195,9 @@ function makeChrome(opts) {
       },
       update(id, updateInfo, cb) {
         calls.windowsUpdate.push({ id, updateInfo });
+        if (wins[id]) {
+          Object.assign(wins[id], updateInfo);
+        }
         if (cb) cb();
       },
       onRemoved: {
@@ -598,7 +605,7 @@ async function main() {
 
   // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
   {
-    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.20"') !== -1, "shim must declare SHIM_VERSION 1.2.20");
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.22"') !== -1, "shim must declare SHIM_VERSION 1.2.22");
     assert(
       SHIM_SRC.indexOf("shouldSkipNormalWindowFallback") !== -1,
       "shim must skip type=normal windows.create on Arc"
@@ -617,6 +624,8 @@ async function main() {
     assert(SHIM_SRC.indexOf("splitGutterBoundsFromAnchor") !== -1, "shim must compute gutter bounds from anchor");
     assert(SHIM_SRC.indexOf("resolveSplitAnchorForTab") !== -1, "shim must resolve anchor from tab window");
     assert(SHIM_SRC.indexOf("notifyArcSplitPanelHint") !== -1, "shim must notify Arc split-panel hint");
+    assert(SHIM_SRC.indexOf("waitForSplitAnchorBounds") !== -1, "shim must wait for anchor before split create");
+    assert(SHIM_SRC.indexOf("verifySplitDockAlignment") !== -1, "shim must verify split dock alignment");
   }
 
   // --- Scenario 10b: Arc uses split-panel (margin + popup), not iframe sidebar ----
@@ -700,7 +709,7 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 0));
     await replayVe(env.chrome, 5555);
-    await new Promise((r) => setTimeout(r, 180));
+    await new Promise((r) => setTimeout(r, 1200));
     assert(env.calls.windowsCreate.length === 1, "split mode must open one docked popup");
     const created = env.calls.windowsCreate[0].opts;
     assert(created.left === 100 + 1280 - 410, "split popup left must match gutter");
@@ -708,8 +717,12 @@ async function main() {
     assert(created.height === 900, "split popup height must match anchor height");
     assert(created.width === 410, "split popup width must match gutter width");
     assert(
-      env.calls.windowsUpdate && env.calls.windowsUpdate.length >= 3,
-      "split mode must retry popup position after open (0/50/150ms)"
+      env.calls.windowsUpdate && env.calls.windowsUpdate.length >= 6,
+      "split mode must retry popup position after open (0/50/150/300/500/1000ms)"
+    );
+    assert(
+      created.focused === false,
+      "split dock popup must not steal focus from Arc on create"
     );
   }
 

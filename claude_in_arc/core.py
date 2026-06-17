@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.21"
+TOOL_VERSION = "1.2.22"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -1883,7 +1883,11 @@ def _doctor_split_panel(verbose: bool = False) -> int:
 
     info("Expected on Arc: page shrinks left (~410px), docked popup flush on the right,")
     detail("page margin + invisible resize strip; popup docks over the gutter.")
-    detail("If it still feels like a separate OS window, drag Arc wider and check the page margin.")
+    detail(
+        "Arc cannot embed Chrome's in-browser side panel — split mode uses a separate "
+        "OS window positioned over the margin."
+    )
+    detail("If it still floats center-screen: focus Arc, press ⌘E, run claude-in-arc upgrade.")
 
     if verbose and build_ok:
         shim_path = BUILD_EXTENSION_DIR / SHIM_FILENAME
@@ -1895,6 +1899,10 @@ def _doctor_split_panel(verbose: bool = False) -> int:
                 ok("Shim defaults Arc to split unless popup is explicit")
             if "forcePanelWindowBounds" in shim:
                 ok("Shim corrects popup bounds after windows.create")
+            if "waitForSplitAnchorBounds" in shim:
+                ok("Shim waits for Arc window geometry before opening docked popup")
+            if "verifySplitDockAlignment" in shim:
+                ok("Shim verifies popup gutter alignment after bounds retries")
             if "openPanelInSplit" in shim:
                 ok("Shim defines openPanelInSplit")
             if "claude-arc-split-host" in shim:

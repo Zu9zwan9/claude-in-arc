@@ -97,6 +97,11 @@ extension.
 
 ### 1. Split-panel mode (default on Arc, v1.2.12+)
 
+**v1.2.22:** waits for Arc window geometry before `windows.create` (avoids
+center-screen floats); popup bounds re-applied at 0/50/150/300/500/1000ms;
+refocuses Arc after dock; verifies gutter alignment and notifies on misalignment.
+Closing the OS popup window removes the page margin (linked close behavior).
+
 **v1.2.17:** popup bounds are re-applied at 0ms, 50ms, and 150ms after open
 (`scheduleSplitBoundsRetries`) because macOS Arc often ignores the first
 `windows.update`. Closing the OS popup window removes the page margin (linked

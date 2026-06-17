@@ -7,20 +7,20 @@ reports a conflict, or you want to confirm every layer of the install.
 daily-use guide. Use this document when you need expected-vs-actual detail for
 each check, service worker console inspection, or a copy-paste recovery recipe.
 
-Current tool version: **v1.2.17** (split popup retries gutter alignment at 0/50/150ms
-on macOS Arc; closing the OS popup window removes the page margin).
+Current tool version: **v1.2.22** (split popup waits for Arc window geometry before
+create; bounds retries at 0/50/150/300/500/1000ms; refocuses Arc after dock;
+verifies gutter alignment).
 
-Previous: v1.2.16 guards split hide during reopen; v1.2.14 popup bounds match gutter;
-v1.2.12 split-panel mode (margin + docked popup); v1.2.11 auto-fallback from
-blocked iframe sidebar; v1.2.10 fixes blank sidebar CSP; v1.2.9 in-page sidebar;
-v1.2.8 docked popup flush to Arc browser right edge.
+Previous: v1.2.17 split popup retries gutter alignment at 0/50/150ms on macOS Arc;
+v1.2.20 fixes double blank arc://new-tab-page window; closing the OS popup window
+removes the page margin.
 
 ---
 
 ## 1. Confirm the tool and build exist
 
 ```bash
-claude-in-arc --version          # should print v1.2.17 or newer
+claude-in-arc --version          # should print v1.2.22 or newer
 claude-in-arc verify             # verbose checklist — all items should pass
 ```
 
@@ -118,10 +118,12 @@ re-applies the margin.
 
 **Note:** Arc cannot embed the panel inside the browser window (no true split view
 API). The popup is a separate OS window positioned to *look* integrated beside
-your page. v1.2.17 re-syncs popup bounds at 0ms, 50ms, and 150ms after open
-because macOS Arc often ignores the first `windows.update`. v1.2.14+ aligns
-left/top/width/height with `anchor.right - panelWidth`. v1.2.13 shows the page
-margin before the popup opens. Drag Arc wider if the panel feels cramped.
+your page — you will still see a narrow title bar on the popup. v1.2.22 waits for
+Arc window geometry before creating the popup (avoids center-screen floats),
+re-syncs bounds at 0/50/150/300/500/1000ms, refocuses Arc after dock, and verifies
+alignment. v1.2.14+ aligns left/top/width/height with `anchor.right - panelWidth`.
+v1.2.13 shows the page margin before the popup opens. Drag Arc wider if the panel
+feels cramped.
 
 **Page console (split mode):**
 
@@ -130,7 +132,7 @@ margin before the popup opens. Drag Arc wider if the panel feels cramped.
 - `[claude-in-arc] split scheduling popup in 50ms margin=active`
 - `[claude-in-arc] split anchor windowId=… @left,top widthxheight`
 - `[claude-in-arc] split gutter sync @left,top widthxheight`
-- `[claude-in-arc] bounds corrected @left,top widthxheight` (may repeat at 0/50/150ms)
+- `[claude-in-arc] bounds corrected @left,top widthxheight` (may repeat at 0/50/150/300/500/1000ms)
 
 ### Popup-only mode
 
@@ -209,7 +211,7 @@ sidepanel.html (those are separate pages).
 **Look for:**
 
 - `[claude-in-arc] arc-shim-prelude loaded (service worker)`
-- `[claude-in-arc] claude-arc-shim v1.2.11 (service worker)`
+- `[claude-in-arc] claude-arc-shim v1.2.22 (service worker)`
 - `[claude-in-arc] sidePanel polyfill active`
 - Import errors for `arc-shim-prelude.js`, `claude-arc-shim.js`, or `arc-sw-loader.js`
 - A "Browser not supported" notification path — shim did not install (stale build)
@@ -254,12 +256,11 @@ tail -50 ~/Library/Logs/claude-in-arc/claude-in-arc.log
      injection failed (restricted URL, stale build, or missing
      `claude-arc-split-host.js`). Re-run `claude-in-arc install` and Reload.
    - **Misaligned popup (empty white column + floating window)** — fixed in
-     v1.2.17: popup must cover the margin gutter exactly via retried bounds sync.
-     Service worker should log `split gutter sync @…` and repeated
-     `bounds corrected @…`. If the popup still floats center-screen, Reload after
-     `claude-in-arc install`, focus the Arc window, then press ⌘E again. Close
-     stray duplicate sidepanel tabs in the sidebar (from older `tabs.create`
-     fallbacks).
+     v1.2.17+ and v1.2.22: popup must cover the margin gutter exactly via retried
+     bounds sync and anchor-wait before create. Service worker should log
+     `split dock target @…`, `split gutter sync @…`, and repeated
+     `bounds corrected @…`. If the popup still floats center-screen, run
+     `claude-in-arc upgrade`, focus the Arc window, then press ⌘E again.
    - **Arc limitation** — a narrow popup with a title bar is expected; true
      in-browser embedding is impossible. Margin + gutter create the integrated
      illusion. Drag Arc wider if needed.
