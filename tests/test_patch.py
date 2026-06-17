@@ -12,6 +12,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claude_in_arc import core
 
@@ -341,8 +342,74 @@ class ArcInspectionTests(unittest.TestCase):
         )
         state = core.inspect_arc_extension()
         self.assertFalse(state.is_patched_path)
+        self.assertTrue(state.store_copy_active)
         self.assertTrue(state.conflict)
+        self.assertFalse(state.store_copy_orphaned)
         self.assertFalse(core.arc_has_patched_build_loaded())
+
+    def test_inspect_orphaned_store_files_not_a_conflict(self):
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        state = core.inspect_arc_extension()
+        self.assertFalse(state.registered)
+        self.assertTrue(state.store_copy_on_disk)
+        self.assertTrue(state.store_copy_orphaned)
+        self.assertFalse(state.store_copy_active)
+        self.assertFalse(state.conflict)
+        self.assertIn("Leftover Store extension files", state.conflict_detail)
+
+    def test_install_continues_with_orphaned_store_files(self):
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        ext = make_fixture(self.tmp / "src-fixture")
+        source = core.SourceExtension(
+            core.Browser("fixture", "Fixture", ext.parent),
+            ext.name,
+            core._parse_version(ext.name) or (0,),
+            ext,
+        )
+        args = argparse.Namespace(
+            source=None,
+            dry_run=False,
+            new_id=False,
+            allow_unverified=False,
+            ignore_conflict=False,
+            open=False,
+            link=False,
+        )
+        with patch.object(core, "pick_source", return_value=source), patch.object(
+            core, "verify_official_source", return_value=core.OFFICIAL_EXTENSION_ID
+        ):
+            rc = core.cmd_install(args)
+        self.assertEqual(rc, core.EXIT_OK)
+        self.assertTrue(core.BUILD_EXTENSION_DIR.is_dir())
+
+    def test_cleanup_removes_orphaned_store_dir(self):
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        self.assertTrue(store.exists())
+        rc = core.cmd_cleanup(argparse.Namespace(dry_run=False))
+        self.assertEqual(rc, core.EXIT_OK)
+        self.assertFalse(store.parent.exists())
+
+    def test_cleanup_skips_active_store_registration(self):
+        store = self.default / "Extensions" / core.OFFICIAL_EXTENSION_ID / "1.0.77_0"
+        store.mkdir(parents=True)
+        (store / "manifest.json").write_text('{"version":"1.0.77"}', encoding="utf-8")
+        self._write_prefs(
+            {
+                "path": str(store.resolve()),
+                "location": core.LOCATION_EXTERNAL_PREF,
+                "from_webstore": True,
+                "disable_reasons": [],
+            }
+        )
+        rc = core.cmd_cleanup(argparse.Namespace(dry_run=False))
+        self.assertEqual(rc, core.EXIT_ERROR)
+        self.assertTrue(store.exists())
 
 
 class RollbackTests(unittest.TestCase):

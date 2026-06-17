@@ -213,6 +213,7 @@ graph TD
 ```bash
 claude-in-arc install      # build + verify + link + open Arc + print the last click (default)
 claude-in-arc doctor       # diagnose: Arc, extension, two-Claude conflict, load state, native messaging
+claude-in-arc cleanup      # remove leftover Store extension files after arc://extensions Remove
 claude-in-arc verify       # verbose walkthrough: expected vs actual for every check (see docs/WALKTHROUGH.md)
 claude-in-arc build        # only (re)build the patched extension
 claude-in-arc link         # mirror the Claude native-messaging host into Arc

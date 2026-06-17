@@ -60,7 +60,7 @@ OFFICIAL_EXTENSION_KEY = (
 NATIVE_HOST_NAME = "com.anthropic.claude_browser_extension"
 NATIVE_HOST_FILENAME = f"{NATIVE_HOST_NAME}.json"
 
-TOOL_VERSION = "1.2.1"
+TOOL_VERSION = "1.2.2"
 
 # Product identity (cohesive voice across CLI + docs).
 PRODUCT_NAME = "Claude in Arc"
@@ -799,14 +799,68 @@ def link_native_messaging(dry_run: bool = False) -> LinkResult:
 # Arc state inspection
 # ---------------------------------------------------------------------------
 
-def arc_has_store_extension() -> bool:
+def _store_extension_roots() -> List[Path]:
+    """Return Arc profile dirs that still contain Store extension files on disk."""
     arc = arc_browser()
     if arc is None or not arc.data_dir.is_dir():
-        return False
+        return []
+    roots: List[Path] = []
     for ext_root in arc.data_dir.glob(f"*/Extensions/{OFFICIAL_EXTENSION_ID}"):
         if ext_root.is_dir() and any(ext_root.iterdir()):
-            return True
-    return False
+            roots.append(ext_root)
+    return roots
+
+
+def arc_has_store_extension() -> bool:
+    return bool(_store_extension_roots())
+
+
+def _arc_profile_extension_settings(profile_dir: Path) -> Optional[Dict]:
+    """Read the Claude extension entry from one Arc profile's prefs."""
+    for pref_name in ("Secure Preferences", "Preferences"):
+        pref = profile_dir / pref_name
+        if not pref.is_file():
+            continue
+        try:
+            data = json.loads(pref.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        ext = (data.get("extensions") or {}).get("settings", {}).get(OFFICIAL_EXTENSION_ID)
+        if ext:
+            return ext
+    return None
+
+
+def find_orphaned_store_extension_dirs() -> List[Path]:
+    """Store extension folders left on disk after removal from arc://extensions."""
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return []
+    orphaned: List[Path] = []
+    for ext_root in _store_extension_roots():
+        profile_dir = ext_root.parent.parent
+        if _arc_profile_extension_settings(profile_dir) is None:
+            orphaned.append(ext_root)
+    return orphaned
+
+
+def find_removable_store_extension_dirs() -> List[Path]:
+    """Store extension folders safe to delete (not actively loaded in that profile)."""
+    arc = arc_browser()
+    if arc is None or not arc.data_dir.is_dir():
+        return []
+    removable: List[Path] = []
+    build_path = str(BUILD_EXTENSION_DIR.resolve())
+    for ext_root in _store_extension_roots():
+        profile_dir = ext_root.parent.parent
+        ext = _arc_profile_extension_settings(profile_dir)
+        if ext is None:
+            removable.append(ext_root)
+            continue
+        registered_path = ext.get("path") or ""
+        if registered_path == build_path or build_path in registered_path:
+            removable.append(ext_root)
+    return removable
 
 
 @dataclass
@@ -822,7 +876,10 @@ class ArcExtensionState:
     is_patched_path: bool = False
     has_patch_marker: bool = False
     store_copy_on_disk: bool = False
+    store_copy_orphaned: bool = False
+    store_copy_active: bool = False
     store_versions: List[str] = field(default_factory=list)
+    orphaned_store_dirs: List[str] = field(default_factory=list)
     conflict: bool = False
     conflict_detail: str = ""
 
@@ -871,14 +928,17 @@ def inspect_arc_extension() -> ArcExtensionState:
     state = ArcExtensionState()
     state.store_copy_on_disk = arc_has_store_extension()
     state.store_versions = _store_versions_on_disk()
+    orphaned_dirs = find_orphaned_store_extension_dirs()
+    state.store_copy_orphaned = bool(orphaned_dirs)
+    state.orphaned_store_dirs = [str(p) for p in orphaned_dirs]
 
     ext = _arc_extension_settings()
     if not ext:
-        if state.store_copy_on_disk:
-            state.registered = True
-            state.conflict = True
+        if state.store_copy_orphaned:
             state.conflict_detail = (
-                "Arc has a Store copy on disk but no active registration in preferences."
+                "Leftover Store extension files on disk (removed from arc://extensions "
+                "but not deleted). They are not loaded — run "
+                "'claude-in-arc cleanup' to remove them."
             )
         return state
 
@@ -907,13 +967,13 @@ def inspect_arc_extension() -> ArcExtensionState:
         except (ValueError, OSError):
             pass
 
-    same_id_store_on_disk = state.store_copy_on_disk and not state.is_patched_path
+    state.store_copy_active = state.registered and not state.is_patched_path
     dual_install = (
         state.is_patched_path
         and state.store_copy_on_disk
         and read_state().get("new_id") is not True
     )
-    if same_id_store_on_disk:
+    if state.store_copy_active:
         state.conflict = True
         state.conflict_detail = (
             "Arc is running the Store copy, not the patched build at "
@@ -926,6 +986,12 @@ def inspect_arc_extension() -> ArcExtensionState:
             f"({', '.join(state.store_versions) or 'unknown version'}). With the same "
             "extension id, remove the Store copy from arc://extensions to avoid "
             "Arc serving stale files on reload/update."
+        )
+    elif state.store_copy_orphaned:
+        state.conflict_detail = (
+            "Leftover Store extension files on disk (removed from arc://extensions "
+            "but not deleted). They are not loaded — run "
+            "'claude-in-arc cleanup' to remove them."
         )
     return state
 
@@ -979,6 +1045,16 @@ def _reveal_in_finder(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def _print_conflict_fix(state: ArcExtensionState, *, include_detail: bool = True) -> None:
+    if state.store_copy_orphaned and not state.conflict:
+        if include_detail:
+            warn(state.conflict_detail)
+        info(
+            f"Run {Style.bold('claude-in-arc cleanup')} to delete the leftover Store "
+            "folder(s), or ignore them — they are not loaded."
+        )
+        for orphan in state.orphaned_store_dirs:
+            detail(orphan)
+        return
     if not state.conflict:
         return
     if include_detail:
@@ -989,7 +1065,8 @@ def _print_conflict_fix(state: ArcExtensionState, *, include_detail: bool = True
             "copy of Claude (keep the unpacked entry pointing at ClaudeInArc)."
         )
         detail("Or rebuild with --new-id if you intentionally want both copies.")
-    elif not state.is_patched_path:
+        detail("Or run: claude-in-arc cleanup")
+    elif state.store_copy_active:
         info(
             f"In {Style.cyan('arc://extensions')}, {Style.bold('Remove')} the Store "
             "copy, then Load unpacked →"
@@ -1003,8 +1080,8 @@ def _print_next_steps(build: BuildResult, opened_page: bool, revealed: bool) -> 
     say("  security boundary that no tool can bypass. It takes about fifteen seconds.")
     say("")
 
-    needs_removal = build.extension_id_preserved and arc_has_store_extension()
     arc_state = inspect_arc_extension()
+    needs_removal = build.extension_id_preserved and arc_state.store_copy_active
     if needs_removal:
         warn("Arc already has the Store copy of Claude. This build shares the official")
         detail("id, so only one copy can be active. Remove the Store copy below — or")
@@ -1062,7 +1139,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     arc_state = inspect_arc_extension()
     if build.extension_id_preserved and not getattr(args, "ignore_conflict", False):
-        if arc_state.store_copy_on_disk and not arc_state.is_patched_path:
+        if arc_state.store_copy_active:
             heading("Store copy conflict")
             fail(
                 "Arc is still running the Chrome Web Store copy of Claude, not the\n"
@@ -1077,6 +1154,17 @@ def cmd_install(args: argparse.Namespace) -> int:
             detail("2. Re-run: claude-in-arc install --new-id  (coexists; different tradeoffs)")
             detail("3. Override (not recommended): claude-in-arc install --ignore-conflict")
             return EXIT_ERROR
+        if arc_state.store_copy_orphaned:
+            heading("Leftover Store files")
+            warn(
+                "Arc still has Store extension files on disk, but they are not\n"
+                "    registered in Arc — you already removed Claude from\n"
+                "    arc://extensions. Install will continue; run cleanup to\n"
+                "    delete the leftover folder(s)."
+            )
+            for orphan in arc_state.orphaned_store_dirs:
+                detail(orphan)
+            say("")
         if arc_state.is_patched_path and arc_state.store_copy_on_disk:
             heading("Action required")
             warn(
@@ -1170,6 +1258,15 @@ def _doctor_arc_extension(verbose: bool = False) -> int:
             detail("Actual: not registered")
         return problems
 
+    if not arc_state.registered and arc_state.store_copy_orphaned:
+        warn("Claude extension not registered in Arc yet. Load it via arc://extensions →\n"
+             "    Developer mode → Load unpacked.")
+        problems += 1
+        if verbose:
+            detail(f"Expected path: {BUILD_EXTENSION_DIR}")
+            detail("Actual: not registered (leftover Store files on disk are harmless)")
+        return problems
+
     if arc_state.is_patched_path and arc_state.has_patch_marker:
         ok("The patched build is registered in Arc.")
         detail(arc_state.path or "")
@@ -1213,6 +1310,9 @@ def _doctor_conflicts() -> int:
         warn(arc_state.conflict_detail)
         _print_conflict_fix(arc_state, include_detail=False)
         problems += 1
+    elif arc_state.store_copy_orphaned:
+        info("Leftover Store extension files on disk (not loaded).")
+        _print_conflict_fix(arc_state, include_detail=False)
     else:
         ok("No Store vs patched conflict detected.")
     return problems
@@ -1240,6 +1340,11 @@ def _print_verify_walkthrough() -> None:
          SHIM_FILENAME),
         ("No Store copy on disk", not arc_state.store_copy_on_disk,
          ", ".join(arc_state.store_versions) if arc_state.store_versions else "none"),
+        (
+            "No leftover Store files",
+            not arc_state.store_copy_orphaned,
+            ", ".join(arc_state.orphaned_store_dirs) if arc_state.orphaned_store_dirs else "none",
+        ),
         ("Extension enabled in Arc", arc_state.registered and not arc_state.disabled,
          "disabled" if arc_state.disabled else arc_state.location_label),
     ]
@@ -1405,6 +1510,58 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    banner()
+    heading("Cleaning up leftover Store files")
+
+    if not arc_installed():
+        warn("Arc isn't installed — nothing to clean up.")
+        return EXIT_OK
+
+    arc = arc_browser()
+    assert arc is not None
+    removable = find_removable_store_extension_dirs()
+    active = [p for p in _store_extension_roots() if p not in removable]
+
+    if not removable and not active:
+        ok("No Store extension folders found on disk.")
+        return EXIT_OK
+
+    if active:
+        warn(
+            "Skipping folder(s) still registered as the active Store copy in Arc.\n"
+            "    Remove Claude from arc://extensions first, then re-run cleanup."
+        )
+        for path in active:
+            detail(str(path))
+
+    if not removable:
+        return EXIT_ERROR
+
+    info(f"Found {len(removable)} leftover Store folder(s) to remove:")
+    for path in removable:
+        detail(str(path))
+
+    if args.dry_run:
+        warn(f"Dry run — would remove {len(removable)} folder(s). Quit Arc first.")
+        return EXIT_OK
+
+    info("Quit Arc before cleanup so it does not recreate files.")
+    removed = 0
+    for ext_root in removable:
+        _assert_within(ext_root, arc.data_dir)
+        if ext_root.name != OFFICIAL_EXTENSION_ID:
+            raise SecurityError(f"Refusing unexpected extension directory name: {ext_root.name}")
+        shutil.rmtree(ext_root)
+        ok(f"Removed {ext_root}")
+        removed += 1
+
+    say("")
+    ok(f"Removed {removed} leftover Store folder(s).")
+    info("Run 'claude-in-arc install' if you have not loaded the patched build yet.")
+    return EXIT_OK
+
+
 def cmd_reveal(args: argparse.Namespace) -> int:
     if not BUILD_EXTENSION_DIR.is_dir():
         fail("No build to reveal yet — run 'claude-in-arc install' first.")
@@ -1494,6 +1651,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_uninstall = sub.add_parser("uninstall", help="Remove the patched build and roll back changes.")
     add_common(p_uninstall)
     p_uninstall.set_defaults(func=cmd_uninstall)
+
+    p_cleanup = sub.add_parser(
+        "cleanup",
+        help="Remove leftover Chrome Web Store extension files from Arc's profile.",
+    )
+    add_common(p_cleanup)
+    p_cleanup.set_defaults(func=cmd_cleanup)
 
     p_reveal = sub.add_parser("reveal", help="Open the patched build folder in Finder.")
     p_reveal.set_defaults(func=cmd_reveal)
