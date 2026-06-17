@@ -605,7 +605,7 @@ async function main() {
 
   // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
   {
-    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.27"') !== -1, "shim must declare SHIM_VERSION 1.2.27");
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.28"') !== -1, "shim must declare SHIM_VERSION 1.2.28");
     assert(SHIM_SRC.indexOf("isHudWebViewContext") !== -1, "shim must detect HUD WKWebView context");
     assert(
       SHIM_SRC.indexOf("skipping shim in HUD WebView") !== -1,

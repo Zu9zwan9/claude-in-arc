@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.27";
+  var SHIM_VERSION = "1.2.28";
 
   function log() {
     try {
@@ -296,6 +296,7 @@
   var hudPort = null;
   var hudReady = false;
   var hudLifecycleWired = false;
+  var lastBrowsingTabId = null;
 
   // Chrome tab ids are numbers; some callers pass strings (runtime messages, JSON).
   // Strict equality (5 !== "5") caused duplicate opens to hide then re-show margin.
@@ -383,6 +384,17 @@
     return DEFAULT_PATH;
   }
 
+  function rememberBrowsingTab(tab) {
+    if (!tab || tab.id == null) return;
+    if (tab.windowId != null && memPanelWindowId === tab.windowId) return;
+    lastBrowsingTabId = normalizeTabId(tab.id);
+  }
+
+  function resolveActiveTabIdFast() {
+    if (lastBrowsingTabId != null) return Promise.resolve(lastBrowsingTabId);
+    return resolveActiveTabId();
+  }
+
   // Best-effort resolution of the "current" browsing tab when open() is called
   // without an explicit tabId. We deliberately exclude popup-type windows so we
   // never target our own panel window.
@@ -392,10 +404,14 @@
         chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
           void chrome.runtime.lastError;
           var t = tabs && tabs[0];
-          if (t && t.id != null) return resolve(t.id);
+          if (t && t.id != null) {
+            rememberBrowsingTab(t);
+            return resolve(t.id);
+          }
           chrome.tabs.query({ active: true }, function (all) {
             void chrome.runtime.lastError;
             var first = (all || []).find(function (x) { return x && x.id != null; });
+            if (first) rememberBrowsingTab(first);
             resolve(first ? first.id : null);
           });
         });
@@ -494,6 +510,13 @@
 
   function hudSendPageContext(tab) {
     if (!tab || tab.id == null) return false;
+    rememberBrowsingTab(tab);
+    log(
+      "hud page_context tabId=" +
+        tab.id +
+        " url=" +
+        (tab.url || "")
+    );
     return sendHudMessage({
       v: 1,
       dir: "ext_to_host",
@@ -505,6 +528,27 @@
   }
 
   function pushActivePageContext() {
+    if (!isHudMode()) return;
+    if (lastBrowsingTabId != null) {
+      try {
+        chrome.tabs.get(lastBrowsingTabId, function (tab) {
+          void chrome.runtime.lastError;
+          if (tab && tab.id != null) {
+            hudSendPageContext(tab);
+            return;
+          }
+          lastBrowsingTabId = null;
+          pushActivePageContextFromQuery();
+        });
+        return;
+      } catch (_e) {
+        lastBrowsingTabId = null;
+      }
+    }
+    pushActivePageContextFromQuery();
+  }
+
+  function pushActivePageContextFromQuery() {
     if (!isHudMode()) return;
     try {
       chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
@@ -668,6 +712,27 @@
       if (typeof callback === "function") callback();
       return;
     }
+    if (lastBrowsingTabId != null) {
+      try {
+        chrome.tabs.get(lastBrowsingTabId, function (tab) {
+          void chrome.runtime.lastError;
+          if (tab && tab.id != null) {
+            hudSendPageContext(tab);
+            if (typeof callback === "function") callback();
+            return;
+          }
+          lastBrowsingTabId = null;
+          pushActivePageContextThenFromQuery(callback);
+        });
+        return;
+      } catch (_e) {
+        lastBrowsingTabId = null;
+      }
+    }
+    pushActivePageContextThenFromQuery(callback);
+  }
+
+  function pushActivePageContextThenFromQuery(callback) {
     try {
       chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
         void chrome.runtime.lastError;
@@ -695,6 +760,7 @@
 
     function maybePushTab(tab) {
       if (!isHudMode() || !tab) return;
+      rememberBrowsingTab(tab);
       hudSendPageContext(tab);
     }
 
@@ -732,8 +798,23 @@
     );
     ensureHudPort();
 
-    function finishOpen() {
-      if (!hudToggle(tabId)) {
+    function completeOpen(resolvedTabId) {
+      resolvedTabId = normalizeTabId(resolvedTabId);
+      if (resolvedTabId == null) resolvedTabId = lastBrowsingTabId;
+      if (resolvedTabId != null) {
+        hudSendMinimalPageContext(resolvedTabId);
+        try {
+          chrome.tabs.get(resolvedTabId, function (tab) {
+            void chrome.runtime.lastError;
+            if (tab) hudSendPageContext(tab);
+          });
+        } catch (_e) {
+          /* no-op */
+        }
+      } else {
+        pushActivePageContext();
+      }
+      if (!hudToggle(resolvedTabId)) {
         notifyOpenFailure(
           "Could not reach Claude HUD. Run: claude-in-arc hud install, then Reload in arc://extensions."
         );
@@ -743,23 +824,11 @@
     }
 
     if (tabId != null) {
-      // Minimal context first so the HUD bridge loads with ?tabId= before toggle_hud.
-      hudSendMinimalPageContext(tabId);
-      try {
-        chrome.tabs.get(tabId, function (tab) {
-          void chrome.runtime.lastError;
-          if (tab) hudSendPageContext(tab);
-        });
-      } catch (_e) {
-        /* no-op */
-      }
-      return Promise.resolve(finishOpen());
+      return Promise.resolve(completeOpen(tabId));
     }
 
-    return new Promise(function (resolve) {
-      pushActivePageContextThen(function () {
-        resolve(finishOpen());
-      });
+    return resolveActiveTabIdFast().then(function (resolved) {
+      return completeOpen(resolved);
     });
   }
 
@@ -2870,15 +2939,18 @@
       chrome.commands.onCommand.addListener(function (command) {
         if (command !== TOGGLE_COMMAND) return;
         log("commands.onCommand " + command);
-        try {
-          chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-            void chrome.runtime.lastError;
-            var t = tabs && tabs[0];
-            if (t && t.id != null) {
-              openPanelImmediate(t.id, "commands.onCommand").catch(function (_e) { /* no-op */ });
+        resolveActiveTabIdFast()
+          .then(function (tabId) {
+            if (tabId == null) {
+              warn(
+                "commands.onCommand: could not resolve active tab — toggling HUD without tabId"
+              );
             }
+            return openPanelImmediate(tabId, "commands.onCommand");
+          })
+          .catch(function (_e) {
+            /* no-op */
           });
-        } catch (_e) { /* no-op */ }
       });
       log("wired commands.onCommand for " + TOGGLE_COMMAND);
     }

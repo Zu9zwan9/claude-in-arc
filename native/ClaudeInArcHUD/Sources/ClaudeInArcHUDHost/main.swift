@@ -96,6 +96,28 @@ func readMessage(from handle: FileHandle) -> Data? {
     return payload.count == Int(length) ? payload : nil
 }
 
+/// Wait briefly for extension `page_context` after `request_page_context` (toggle had no tabId).
+func readMessageWithTimeout(seconds: TimeInterval, from handle: FileHandle) -> Data? {
+    let fd = handle.fileDescriptor
+    var pollfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    let timeoutMs = Int32((seconds * 1000).rounded())
+    guard poll(&pollfd, 1, timeoutMs) > 0, (pollfd.revents & Int16(POLLIN)) != 0 else {
+        return nil
+    }
+    return readMessage(from: handle)
+}
+
+fileprivate func logInboundPayload(_ data: Data) {
+    if let line = String(data: data, encoding: .utf8) {
+        stderr.write(Data("[ClaudeInArcHUDHost] \(line)\n".utf8))
+    }
+}
+
+fileprivate func handleInboundPageContext(_ decoded: InboundMessage) {
+    ensureHudAppReady()
+    forwardToAppReliably(decoded)
+}
+
 func writeMessage<T: Encodable>(_ message: T, to handle: FileHandle) {
     guard let json = try? JSONEncoder().encode(message),
           json.count <= Int(UInt32.max) else { return }
@@ -231,12 +253,30 @@ while let data = readMessage(from: stdin) {
     case "ping":
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "toggle_hud":
+        ensureHudAppReady()
         if let decoded, let tabId = decoded.tabId {
-            forwardToAppReliably(InboundMessage(type: "page_context", tabId: tabId, url: "", title: ""))
+            forwardToAppReliably(InboundMessage(
+                type: "page_context",
+                tabId: tabId,
+                url: decoded.url ?? "",
+                title: decoded.title ?? ""
+            ))
+            writeMessage(OutboundMessage(type: "request_page_context"), to: stdout)
+            forwardToAppReliably(decoded)
+            writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
+        } else {
+            writeMessage(OutboundMessage(type: "request_page_context"), to: stdout)
+            if let ctxData = readMessageWithTimeout(seconds: 0.4, from: stdin),
+               let ctx = try? JSONDecoder().decode(InboundMessage.self, from: ctxData),
+               ctx.type == "page_context" {
+                logInboundPayload(ctxData)
+                handleInboundPageContext(ctx)
+            } else {
+                stderr.write(Data("[ClaudeInArcHUDHost] toggle_hud without tabId — no page_context within 400ms\n".utf8))
+            }
+            if let decoded { forwardToAppReliably(decoded) }
+            writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
         }
-        writeMessage(OutboundMessage(type: "request_page_context"), to: stdout)
-        if let decoded { forwardToAppReliably(decoded) }
-        writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
     case "set_collapsed":
         ensureHudAppReady()
         if let decoded { forwardToAppReliably(decoded) }
@@ -246,8 +286,7 @@ while let data = readMessage(from: stdin) {
             to: stdout
         )
     case "page_context":
-        ensureHudAppReady()
-        if let decoded { forwardToApp(decoded) }
+        if let decoded { handleInboundPageContext(decoded) }
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "hud_chrome_response":
         if let decoded {

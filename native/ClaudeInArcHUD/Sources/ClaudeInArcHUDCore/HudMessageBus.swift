@@ -13,4 +13,12 @@ public enum HudMessageBus {
         public static let collapsed = "collapsed"
         public static let visible = "visible"
     }
+
+    /// `DistributedNotificationCenter` delivers numeric userInfo values as `NSNumber`, not `Int`.
+    public static func intValue(in info: [AnyHashable: Any], key: String) -> Int? {
+        if let value = info[key] as? Int { return value }
+        if let number = info[key] as? NSNumber { return number.intValue }
+        if let string = info[key] as? String, let value = Int(string) { return value }
+        return nil
+    }
 }

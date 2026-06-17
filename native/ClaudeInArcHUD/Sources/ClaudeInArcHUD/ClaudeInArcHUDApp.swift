@@ -65,7 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "page_context":
             let title = info[HudMessageBus.Key.title] as? String ?? ""
             let url = info[HudMessageBus.Key.url] as? String ?? ""
-            let tabId = info[HudMessageBus.Key.tabId] as? Int
+            let tabId = HudMessageBus.intValue(in: info, key: HudMessageBus.Key.tabId)
+            NSLog(
+                "[ClaudeInArcHUD] page_context tabId=%@ url=%@",
+                tabId.map(String.init) ?? "nil",
+                url.isEmpty ? "(pending)" : url
+            )
             applyPageContext(title: title, url: url, tabId: tabId)
         default:
             break

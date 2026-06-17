@@ -29,10 +29,11 @@ public final class HUDPanelController: NSObject {
 
     public func updatePageContext(title: String, url: String, tabId: Int?) {
         let tabChanged = tabId != pageTabId
+        let needsBridge = tabId != nil && (pageTabId == nil || tabChanged)
         pageTitle = title
         pageURL = url
         pageTabId = tabId
-        if tabChanged, isVisible {
+        if needsBridge, isVisible {
             loadBridge()
         }
     }

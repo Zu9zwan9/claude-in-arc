@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.27"
+TOOL_VERSION = "1.2.28"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -638,6 +638,16 @@ def _apply_panel_mode_to_shim(shim_path: Path, panel_mode: str) -> None:
     shim_path.write_text(updated, encoding="utf-8")
 
 
+def _ensure_native_messaging_permission(manifest: Dict) -> bool:
+    """Ensure connectNative can reach HUD / Claude Desktop hosts."""
+    perms = list(manifest.get("permissions") or [])
+    if "nativeMessaging" in perms:
+        return False
+    perms.append("nativeMessaging")
+    manifest["permissions"] = perms
+    return True
+
+
 def _patch_web_accessible_resources(manifest: Dict, resource: str) -> bool:
     """Ensure an extension page can be embedded in a page iframe (no new permission)."""
     war = manifest.get("web_accessible_resources")
@@ -813,6 +823,8 @@ def build_extension(
             manifest["name"] = f"{base_name} (Arc)"
 
     _patch_web_accessible_resources(manifest, SIDEBAR_BRIDGE_FILENAME)
+    if panel_mode == "hud":
+        _ensure_native_messaging_permission(manifest)
 
     (BUILD_EXTENSION_DIR / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -2205,6 +2217,19 @@ def _doctor_hud(verbose: bool = False) -> int:
         detail("Remove the Store copy on arc://extensions; keep only Load unpacked.")
         problems += 1
 
+    try:
+        manifest = _read_manifest(BUILD_EXTENSION_DIR)
+        perms = manifest.get("permissions") or []
+        if "nativeMessaging" in perms:
+            ok("Extension manifest includes nativeMessaging (connectNative).")
+        else:
+            warn("Extension manifest missing nativeMessaging permission.")
+            detail("Run: claude-in-arc install --panel-mode hud  then Reload arc://extensions.")
+            problems += 1
+    except (OSError, ValueError, CliError):
+        warn("Could not read patched manifest for nativeMessaging check.")
+
+    info("After upgrading: click Reload on arc://extensions (required for shim changes).")
     info("On ⌘E: compact notch pill + floating chat panel below the menu bar.")
     detail("Console.app → ClaudeInArcHUD / ClaudeInArcHUDHost for loadBridge and scheme logs.")
     if verbose:

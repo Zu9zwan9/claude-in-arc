@@ -154,6 +154,8 @@ class PatchEngineTests(unittest.TestCase):
         self.assertEqual(result.panel_mode, "hud")
         marker = json.loads((result.build_dir / core.PATCH_MARKER_FILENAME).read_text())
         self.assertEqual(marker.get("panel_mode"), "hud")
+        manifest = json.loads((result.build_dir / "manifest.json").read_text())
+        self.assertIn("nativeMessaging", manifest.get("permissions") or [])
 
     def test_panel_mode_split_baked_into_shim(self):
         ext = make_fixture(self.src_root)
@@ -284,7 +286,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.27")
+        self.assertEqual(core.shim_version_label(), "1.2.28")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))
@@ -739,7 +741,7 @@ class UpgradeTests(unittest.TestCase):
             core, "_arc_click_reload_extension", return_value=(False, "reload_not_found")
         ), patch.object(core, "_open_url_in_arc", return_value=True), patch.object(
             core, "_arc_send_toggle_side_panel", return_value=(True, "sent")
-        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.27")):
+        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.28")):
             rc = core.cmd_upgrade(args)
         self.assertEqual(rc, core.EXIT_ERROR)
 
