@@ -289,11 +289,14 @@ If you see `connectNative unavailable` or `HUD postMessage failed`, run `claude-
 
 If `toggle_hud` posts but no panel: ensure `ClaudeInArcHUD` is running (menu-bar **Claude** icon). v1.2.26+ auto-launches it from the native host.
 
-### Common root causes (fixed in v1.2.26)
+### Common root causes (fixed in v1.2.26–v1.2.27)
 
-1. **Menu-bar app not running** — host only spoke to Chrome; toggle notifications were dropped. Host now auto-launches `ClaudeInArcHUD` sibling binary.
+1. **Menu-bar app not running** — host only spoke to Chrome; toggle notifications were dropped. Host now auto-launches `ClaudeInArcHUD` sibling binary (retries notification 4×).
 2. **`hudChrome` WKScriptMessageHandler registered after `WKWebView` init** — chrome polyfill could not proxy `storage.*` / `runtime.sendMessage`; sidepanel rendered blank. Handler is now registered on `WKWebViewConfiguration` before WebView creation.
 3. **Extension build missing bridge assets** — `ExtensionRootResolver` requires `claude-arc-hud-bridge.html` in the patched build directory. Re-run `claude-in-arc install --panel-mode hud`.
+4. **Expanded notch mistaken for chat panel** — v1.2.27 keeps the notch compact on ⌘E; chat opens in the floating `HUDPanelController` panel (higher window level, key + focus).
+5. **Full shim running inside HUD sidepanel iframe** — v1.2.27 bails in `claude-in-arc-ext://` context so only the native chrome polyfill is active.
+6. **Store copy loaded** — panel shows an on-screen error; run `claude-in-arc doctor` and remove the Store Claude entry on arc://extensions.
 
 ---
 

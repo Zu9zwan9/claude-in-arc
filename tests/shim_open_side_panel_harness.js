@@ -605,7 +605,12 @@ async function main() {
 
   // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
   {
-    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.26"') !== -1, "shim must declare SHIM_VERSION 1.2.26");
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.27"') !== -1, "shim must declare SHIM_VERSION 1.2.27");
+    assert(SHIM_SRC.indexOf("isHudWebViewContext") !== -1, "shim must detect HUD WKWebView context");
+    assert(
+      SHIM_SRC.indexOf("skipping shim in HUD WebView") !== -1,
+      "shim must skip full polyfill inside HUD WebView"
+    );
     assert(
       SHIM_SRC.indexOf("shouldSkipNormalWindowFallback") !== -1,
       "shim must skip type=normal windows.create on Arc"

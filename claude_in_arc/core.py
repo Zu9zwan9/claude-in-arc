@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.26"
+TOOL_VERSION = "1.2.27"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -2146,6 +2146,74 @@ def _doctor_arc_expectations() -> None:
     )
 
 
+def _doctor_hud(verbose: bool = False) -> int:
+    """Return number of HUD-specific setup problems."""
+    if not arc_installed():
+        return 0
+
+    build_ok = BUILD_EXTENSION_DIR.is_dir() and (BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).is_file()
+    if not build_ok:
+        return 0
+
+    marker = json.loads((BUILD_EXTENSION_DIR / PATCH_MARKER_FILENAME).read_text(encoding="utf-8"))
+    if _normalize_panel_mode(marker.get("panel_mode", "popup")) != "hud":
+        return 0
+
+    problems = 0
+    heading("Notch HUD (panel-mode hud)")
+
+    for name in (HUD_BRIDGE_FILENAME, HUD_BRIDGE_JS_FILENAME, HUD_CHROME_POLYFILL_FILENAME):
+        path = BUILD_EXTENSION_DIR / name
+        if path.is_file():
+            ok(f"HUD asset present ({name})")
+        else:
+            warn(f"Missing {name} in patched build.")
+            detail("Run: claude-in-arc install --panel-mode hud")
+            problems += 1
+
+    pkg = _hud_package_dir()
+    if pkg is None:
+        warn("native/ClaudeInArcHUD not found in this checkout.")
+        problems += 1
+    else:
+        host_bin = _hud_host_binary(pkg)
+        app_bin = _hud_app_binary(pkg)
+        if host_bin.is_file():
+            ok(f"HUD host binary: {host_bin.name}")
+        else:
+            warn("HUD host binary missing.")
+            detail("Run: claude-in-arc hud build")
+            problems += 1
+        if app_bin.is_file():
+            ok(f"Menu-bar app binary: {app_bin.name}")
+        else:
+            warn("ClaudeInArcHUD menu-bar app missing.")
+            detail("Run: claude-in-arc hud build && claude-in-arc hud open")
+            problems += 1
+
+    arc = arc_browser()
+    if arc and (_nmh_dir(arc) / HUD_HOST_FILENAME).is_file():
+        ok("HUD native-messaging manifest registered in Arc.")
+    else:
+        warn("HUD native-messaging host not registered.")
+        detail("Run: claude-in-arc hud install")
+        problems += 1
+
+    arc_state = inspect_arc_extension()
+    if arc_state.store_copy_active:
+        warn("Store Claude extension is loaded — HUD chrome proxy will not work.")
+        detail("Remove the Store copy on arc://extensions; keep only Load unpacked.")
+        problems += 1
+
+    info("On ⌘E: compact notch pill + floating chat panel below the menu bar.")
+    detail("Console.app → ClaudeInArcHUD / ClaudeInArcHUDHost for loadBridge and scheme logs.")
+    if verbose:
+        detail(f"Patched extension path: {BUILD_EXTENSION_DIR}")
+        detail(f"Arc registered path: {arc_state.path or '(none)'}")
+
+    return problems
+
+
 def _doctor_split_panel(verbose: bool = False) -> int:
     """Return number of split-panel setup problems on Arc."""
     if not arc_installed():
@@ -2358,6 +2426,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     problems += _doctor_arc_extension(verbose=verbose)
     if arc_installed():
         _doctor_arc_expectations()
+        problems += _doctor_hud(verbose=verbose)
         problems += _doctor_split_panel(verbose=verbose)
     problems += _doctor_conflicts()
 

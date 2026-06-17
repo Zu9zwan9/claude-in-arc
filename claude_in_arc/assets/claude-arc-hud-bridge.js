@@ -86,7 +86,7 @@
     warn("sidepanel iframe error event");
     clearLoadTimer();
     showError(
-      "Claude panel failed to load in the HUD. Run claude-in-arc install, hud install, reload the extension, and ensure the HUD app is running."
+      "Claude panel failed to load in the HUD. Run claude-in-arc install --panel-mode hud, claude-in-arc hud install, reload the extension, and ensure only the Load unpacked copy is enabled (remove any Store Claude entry on arc://extensions)."
     );
   });
 
@@ -94,7 +94,7 @@
     if (panelReady) return;
     warn("sidepanel iframe load timeout after " + LOAD_TIMEOUT_MS + "ms");
     showError(
-      "Claude panel is taking too long to load. Check arc://extensions service worker console and confirm claude-in-arc hud open is running."
+      "Claude panel is taking too long to load. Run claude-in-arc doctor — remove any Store Claude copy on arc://extensions, Reload, then press ⌘E again. Check Console.app → ClaudeInArcHUD for scheme 404 errors."
     );
   }, LOAD_TIMEOUT_MS);
 

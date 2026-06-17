@@ -120,6 +120,17 @@ fileprivate func forwardToApp(_ decoded: InboundMessage) {
     )
 }
 
+/// Post the same HUD message a few times so a freshly launched menu-bar app does not miss it.
+fileprivate func forwardToAppReliably(_ decoded: InboundMessage) {
+    ensureHudAppReady()
+    for attempt in 0..<4 {
+        forwardToApp(decoded)
+        if attempt < 3 {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+}
+
 fileprivate func hudAppBinaryURL() -> URL {
     URL(fileURLWithPath: CommandLine.arguments[0])
         .resolvingSymlinksInPath()
@@ -220,12 +231,11 @@ while let data = readMessage(from: stdin) {
     case "ping":
         writeMessage(OutboundMessage(type: "pong"), to: stdout)
     case "toggle_hud":
-        ensureHudAppReady()
-        if let decoded { forwardToApp(decoded) }
+        if let decoded { forwardToAppReliably(decoded) }
         writeMessage(OutboundMessage(type: "hud_expanded", expanded: true), to: stdout)
     case "set_collapsed":
         ensureHudAppReady()
-        if let decoded { forwardToApp(decoded) }
+        if let decoded { forwardToAppReliably(decoded) }
         let collapsed = decoded?.collapsed ?? true
         writeMessage(
             OutboundMessage(type: collapsed ? "hud_collapsed" : "hud_expanded", expanded: !collapsed),

@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.26";
+  var SHIM_VERSION = "1.2.27";
 
   function log() {
     try {
@@ -66,8 +66,30 @@
     } catch (_e) { /* no-op */ }
   }
 
+  function isHudWebViewContext() {
+    try {
+      if (window.__claudeInArcHudChrome) return true;
+      if (typeof location !== "undefined" && location.protocol === "claude-in-arc-ext:") {
+        return true;
+      }
+    } catch (_e) {
+      /* no-op */
+    }
+    return false;
+  }
+
   // Bail out quietly if we are not in an extension context.
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+    return;
+  }
+
+  // HUD WKWebView: chrome APIs come from claude-arc-hud-chrome-polyfill.js injected
+  // by the native app. Do not install the full sidePanel polyfill in this context.
+  if (!isServiceWorkerContext() && isHudWebViewContext()) {
+    if (isSidepanelPage()) {
+      ensureTabIdInPanelUrl();
+    }
+    log("skipping shim in HUD WebView (native chrome polyfill active)");
     return;
   }
 
@@ -621,8 +643,49 @@
     }
   }
 
-  function hudToggle() {
-    return sendHudMessage({ v: 1, dir: "ext_to_host", type: "toggle_hud" });
+  function hudToggle(tabId) {
+    tabId = normalizeTabId(tabId);
+    var msg = { v: 1, dir: "ext_to_host", type: "toggle_hud" };
+    if (tabId != null) msg.tabId = tabId;
+    return sendHudMessage(msg);
+  }
+
+  function hudSendMinimalPageContext(tabId) {
+    tabId = normalizeTabId(tabId);
+    if (tabId == null) return false;
+    return sendHudMessage({
+      v: 1,
+      dir: "ext_to_host",
+      type: "page_context",
+      tabId: tabId,
+      url: "",
+      title: "",
+    });
+  }
+
+  function pushActivePageContextThen(callback) {
+    if (!isHudMode()) {
+      if (typeof callback === "function") callback();
+      return;
+    }
+    try {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+        void chrome.runtime.lastError;
+        var tab = tabs && tabs[0];
+        if (tab && tab.id != null) {
+          hudSendPageContext(tab);
+          if (typeof callback === "function") callback();
+          return;
+        }
+        chrome.tabs.query({ active: true, currentWindow: true }, function (tabs2) {
+          void chrome.runtime.lastError;
+          if (tabs2 && tabs2[0]) hudSendPageContext(tabs2[0]);
+          if (typeof callback === "function") callback();
+        });
+      });
+    } catch (_e) {
+      if (typeof callback === "function") callback();
+    }
   }
 
   function wireHudLifecycle() {
@@ -668,7 +731,20 @@
         (reason || "unknown")
     );
     ensureHudPort();
+
+    function finishOpen() {
+      if (!hudToggle(tabId)) {
+        notifyOpenFailure(
+          "Could not reach Claude HUD. Run: claude-in-arc hud install, then Reload in arc://extensions."
+        );
+        return false;
+      }
+      return true;
+    }
+
     if (tabId != null) {
+      // Minimal context first so the HUD bridge loads with ?tabId= before toggle_hud.
+      hudSendMinimalPageContext(tabId);
       try {
         chrome.tabs.get(tabId, function (tab) {
           void chrome.runtime.lastError;
@@ -677,16 +753,14 @@
       } catch (_e) {
         /* no-op */
       }
-    } else {
-      pushActivePageContext();
+      return Promise.resolve(finishOpen());
     }
-    if (!hudToggle()) {
-      notifyOpenFailure(
-        "Could not reach Claude HUD. Run: claude-in-arc hud install, then Reload in arc://extensions."
-      );
-      return Promise.resolve(false);
-    }
-    return Promise.resolve(true);
+
+    return new Promise(function (resolve) {
+      pushActivePageContextThen(function () {
+        resolve(finishOpen());
+      });
+    });
   }
 
   function activePanelWidth() {

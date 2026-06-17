@@ -123,7 +123,7 @@ private struct NotchExpandedView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
-            Text("Press ⌘E or use the panel below")
+            Text("Press ⌘E to open the chat panel below the notch")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }

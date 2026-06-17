@@ -60,8 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 panel.hide()
                 pill.showCollapsed()
             } else {
-                panel.show()
-                pill.expand()
+                openChatPanel()
             }
         case "page_context":
             let title = info[HudMessageBus.Key.title] as? String ?? ""
@@ -84,9 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.hide()
             pill.showCollapsed()
         } else {
-            panel.show()
-            pill.expand()
-            panel.focusChatInput()
+            openChatPanel()
         }
+    }
+
+    /// Chat lives in the floating WKWebView panel — keep the notch compact so users
+    /// don't confuse the expanded DynamicNotchKit chrome with the chat surface.
+    private func openChatPanel() {
+        panel.show()
+        pill.showCollapsed()
+        panel.focusChatInput()
     }
 }
