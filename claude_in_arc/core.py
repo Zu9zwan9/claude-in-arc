@@ -65,7 +65,7 @@ HUD_HOST_NAME = "com.claudeinarac.hud"
 HUD_HOST_FILENAME = f"{HUD_HOST_NAME}.json"
 HUD_STATE_KEY = "hud_native_manifest"
 
-TOOL_VERSION = "1.2.24"
+TOOL_VERSION = "1.2.25"
 
 # Anthropic's remote WebSocket bridge for Claude Code `/chrome` automation.
 # Unrelated to claude-in-arc's local sidebar bridge page (claude-arc-sidebar-bridge.html).
@@ -96,6 +96,9 @@ PRELUDE_FILENAME = "arc-shim-prelude.js"
 SW_LOADER_FILENAME = "arc-sw-loader.js"
 SIDEBAR_BRIDGE_FILENAME = "claude-arc-sidebar-bridge.html"
 SIDEBAR_BRIDGE_JS_FILENAME = "claude-arc-sidebar-bridge.js"
+HUD_BRIDGE_FILENAME = "claude-arc-hud-bridge.html"
+HUD_BRIDGE_JS_FILENAME = "claude-arc-hud-bridge.js"
+HUD_CHROME_POLYFILL_FILENAME = "claude-arc-hud-chrome-polyfill.js"
 SIDEBAR_HOST_FILENAME = "claude-arc-sidebar-host.js"
 SPLIT_HOST_FILENAME = "claude-arc-split-host.js"
 PANEL_MODE_STATE_KEY = "panel_mode"
@@ -109,6 +112,9 @@ SHIM_SOURCE = ASSETS_DIR / SHIM_FILENAME
 PRELUDE_SOURCE = ASSETS_DIR / PRELUDE_FILENAME
 SIDEBAR_BRIDGE_SOURCE = ASSETS_DIR / SIDEBAR_BRIDGE_FILENAME
 SIDEBAR_BRIDGE_JS_SOURCE = ASSETS_DIR / SIDEBAR_BRIDGE_JS_FILENAME
+HUD_BRIDGE_SOURCE = ASSETS_DIR / HUD_BRIDGE_FILENAME
+HUD_BRIDGE_JS_SOURCE = ASSETS_DIR / HUD_BRIDGE_JS_FILENAME
+HUD_CHROME_POLYFILL_SOURCE = ASSETS_DIR / HUD_CHROME_POLYFILL_FILENAME
 SIDEBAR_HOST_SOURCE = ASSETS_DIR / SIDEBAR_HOST_FILENAME
 SPLIT_HOST_SOURCE = ASSETS_DIR / SPLIT_HOST_FILENAME
 
@@ -712,6 +718,14 @@ def build_extension(
         raise CliError(f"Internal error: sidebar bridge asset missing at {SIDEBAR_BRIDGE_SOURCE}")
     if not SIDEBAR_BRIDGE_JS_SOURCE.is_file():
         raise CliError(f"Internal error: sidebar bridge script missing at {SIDEBAR_BRIDGE_JS_SOURCE}")
+    if not HUD_BRIDGE_SOURCE.is_file():
+        raise CliError(f"Internal error: HUD bridge asset missing at {HUD_BRIDGE_SOURCE}")
+    if not HUD_BRIDGE_JS_SOURCE.is_file():
+        raise CliError(f"Internal error: HUD bridge script missing at {HUD_BRIDGE_JS_SOURCE}")
+    if not HUD_CHROME_POLYFILL_SOURCE.is_file():
+        raise CliError(
+            f"Internal error: HUD chrome polyfill missing at {HUD_CHROME_POLYFILL_SOURCE}"
+        )
     if not SIDEBAR_HOST_SOURCE.is_file():
         raise CliError(f"Internal error: sidebar host asset missing at {SIDEBAR_HOST_SOURCE}")
     if not SPLIT_HOST_SOURCE.is_file():
@@ -770,6 +784,9 @@ def build_extension(
     shutil.copy2(PRELUDE_SOURCE, BUILD_EXTENSION_DIR / PRELUDE_FILENAME)
     shutil.copy2(SIDEBAR_BRIDGE_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_BRIDGE_FILENAME)
     shutil.copy2(SIDEBAR_BRIDGE_JS_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_BRIDGE_JS_FILENAME)
+    shutil.copy2(HUD_BRIDGE_SOURCE, BUILD_EXTENSION_DIR / HUD_BRIDGE_FILENAME)
+    shutil.copy2(HUD_BRIDGE_JS_SOURCE, BUILD_EXTENSION_DIR / HUD_BRIDGE_JS_FILENAME)
+    shutil.copy2(HUD_CHROME_POLYFILL_SOURCE, BUILD_EXTENSION_DIR / HUD_CHROME_POLYFILL_FILENAME)
     shutil.copy2(SIDEBAR_HOST_SOURCE, BUILD_EXTENSION_DIR / SIDEBAR_HOST_FILENAME)
     shutil.copy2(SPLIT_HOST_SOURCE, BUILD_EXTENSION_DIR / SPLIT_HOST_FILENAME)
     _apply_panel_mode_to_shim(BUILD_EXTENSION_DIR / SHIM_FILENAME, panel_mode)
@@ -859,6 +876,9 @@ def _validate_build(build_dir: Path) -> None:
         SHIM_FILENAME,
         SIDEBAR_BRIDGE_FILENAME,
         SIDEBAR_BRIDGE_JS_FILENAME,
+        HUD_BRIDGE_FILENAME,
+        HUD_BRIDGE_JS_FILENAME,
+        HUD_CHROME_POLYFILL_FILENAME,
         SIDEBAR_HOST_FILENAME,
         SPLIT_HOST_FILENAME,
         manifest["background"].get("service_worker"),

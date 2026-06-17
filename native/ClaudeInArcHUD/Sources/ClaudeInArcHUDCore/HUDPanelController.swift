@@ -1,27 +1,36 @@
 import AppKit
+import WebKit
 
 /// Borderless-ish floating panel anchored below the menu bar / notch.
-public final class HUDPanelController {
+@MainActor
+public final class HUDPanelController: NSObject {
     public static let defaultWidth: CGFloat = 400
     public static let defaultHeight: CGFloat = 520
+    private static let bridgeScheme = "claude-in-arc-ext"
 
     private var panel: NSPanel?
-    private var placeholderView: HUDPlaceholderView?
+    private var webView: WKWebView?
+    private var chromeBridge: HudChromeBridge?
+    private var schemeHandler: ExtensionSchemeHandler?
+    private var extensionRoot: URL?
 
     public private(set) var pageTitle = ""
     public private(set) var pageURL = ""
     public private(set) var pageTabId: Int?
 
-    public init() {}
+    public override init() {
+        super.init()
+        extensionRoot = ExtensionRootResolver.resolve()
+    }
 
     public func updatePageContext(title: String, url: String, tabId: Int?) {
+        let tabChanged = tabId != pageTabId
         pageTitle = title
         pageURL = url
         pageTabId = tabId
-        placeholderView?.pageTitle = title
-        placeholderView?.pageURL = url
-        placeholderView?.pageTabId = tabId
-        placeholderView?.needsDisplay = true
+        if tabChanged, isVisible {
+            loadBridge()
+        }
     }
 
     public var isVisible: Bool {
@@ -37,11 +46,45 @@ public final class HUDPanelController {
     }
 
     public func show() {
-        if let panel {
+        if extensionRoot == nil {
+            extensionRoot = ExtensionRootResolver.resolve()
+        }
+
+        if let panel, let webView {
             positionBelowMenuBar(panel)
             panel.orderFrontRegardless()
+            loadBridge()
+            webView.becomeFirstResponder()
             return
         }
+
+        guard let extensionRoot else {
+            showMissingExtensionPanel()
+            return
+        }
+
+        let config = WKWebViewConfiguration()
+        let handler = ExtensionSchemeHandler(extensionRoot: extensionRoot)
+        schemeHandler = handler
+        config.setURLSchemeHandler(handler, forURLScheme: Self.bridgeScheme)
+
+        let polyfillPath = extensionRoot.appendingPathComponent("claude-arc-hud-chrome-polyfill.js")
+        if let polyfill = try? String(contentsOf: polyfillPath, encoding: .utf8) {
+            let script = WKUserScript(
+                source: polyfill,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+            config.userContentController.addUserScript(script)
+        }
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        self.webView = webView
+
+        let bridge = HudChromeBridge(webView: webView)
+        chromeBridge = bridge
+        config.userContentController.add(bridge, name: "hudChrome")
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.defaultWidth, height: Self.defaultHeight),
@@ -60,25 +103,78 @@ public final class HUDPanelController {
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
 
-        let placeholder = HUDPlaceholderView(frame: panel.contentView?.bounds ?? .zero)
-        placeholder.pageTitle = pageTitle
-        placeholder.pageURL = pageURL
-        placeholder.pageTabId = pageTabId
-        panel.contentView = placeholder
-        placeholderView = placeholder
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: Self.defaultWidth, height: Self.defaultHeight))
+        container.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: container.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        panel.contentView = container
 
         positionBelowMenuBar(panel)
         panel.orderFrontRegardless()
         self.panel = panel
+        loadBridge()
     }
 
     public func hide() {
         panel?.orderOut(nil)
     }
 
+    public func focusChatInput() {
+        webView?.becomeFirstResponder()
+    }
+
+    private func loadBridge() {
+        guard let webView else { return }
+        var path = "claude-arc-hud-bridge.html"
+        if let tabId = pageTabId {
+            path += "?tabId=\(tabId)"
+        }
+        let urlString = "\(Self.bridgeScheme)://localhost/\(path)"
+        guard let url = URL(string: urlString) else { return }
+        webView.load(URLRequest(url: url))
+    }
+
+    private func showMissingExtensionPanel() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: Self.defaultWidth, height: Self.defaultHeight),
+            styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Claude"
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.isReleasedWhenClosed = false
+
+        let label = NSTextField(labelWithString:
+            "Claude extension not found.\n\nRun:\n  claude-in-arc install\n  claude-in-arc hud install\nThen reload arc://extensions."
+        )
+        label.alignment = .center
+        label.textColor = .secondaryLabelColor
+        label.font = .systemFont(ofSize: 13)
+        label.maximumNumberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView(frame: panel.contentView?.bounds ?? .zero)
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            label.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -48),
+        ])
+        panel.contentView = container
+        positionBelowMenuBar(panel)
+        panel.orderFrontRegardless()
+        self.panel = panel
+    }
+
     /// Center horizontally under the menu bar / notch gap.
-    /// Uses `auxiliaryTopLeftArea` + `auxiliaryTopRightArea` when present (notched MacBooks),
-    /// matching the pattern used by Boring Notch and other OSS notch overlays.
     public func positionBelowMenuBar(_ panel: NSPanel) {
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.frame
@@ -86,7 +182,6 @@ public final class HUDPanelController {
 
         let x: CGFloat
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            // Notch span: center the HUD in the gap between auxiliary areas.
             let notchLeft = left.maxX
             let notchRight = right.minX
             let notchMid = (notchLeft + notchRight) / 2
@@ -98,56 +193,5 @@ public final class HUDPanelController {
         let menuBarHeight = screenFrame.maxY - screen.visibleFrame.maxY
         let y = screenFrame.maxY - menuBarHeight - size.height - 8
         panel.setFrameOrigin(NSPoint(x: x, y: y))
-    }
-}
-
-/// Minimal placeholder until WKWebView loads extension sidepanel.html.
-private final class HUDPlaceholderView: NSView {
-    var pageTitle = ""
-    var pageURL = ""
-    var pageTabId: Int?
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
-
-        var lines = ["Claude in Arc HUD", ""]
-        if !pageTitle.isEmpty {
-            lines.append(pageTitle)
-        }
-        if !pageURL.isEmpty {
-            lines.append(pageURL)
-        }
-        if let tabId = pageTabId {
-            lines.append("tabId: \(tabId)")
-        }
-        if pageTitle.isEmpty && pageURL.isEmpty {
-            lines.append("Browse in Arc — page context appears here.")
-        }
-        lines.append("")
-        lines.append("Chat bridge (M3)")
-
-        let text = lines.joined(separator: "\n")
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineSpacing = 3
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: paragraph,
-        ]
-        let attributed = NSAttributedString(string: text, attributes: attrs)
-        let size = attributed.boundingRect(
-            with: NSSize(width: bounds.width - 48, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        ).size
-        let rect = NSRect(
-            x: (bounds.width - size.width) / 2,
-            y: (bounds.height - size.height) / 2,
-            width: size.width,
-            height: size.height
-        )
-        attributed.draw(in: rect)
     }
 }

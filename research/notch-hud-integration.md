@@ -210,9 +210,9 @@ HUD pill subtitle updates; expanded chat receives same `tabId` as split mode.
 | Milestone | Scope | Estimate | Status |
 |-----------|-------|----------|--------|
 | **M0** | Schema, SPM scaffold, `hud-message-v1.json`, CLI `claude-in-arc hud build` | 1–2 days | **Done (scaffold)** |
-| **M1** | DynamicNotchKit pill + menu bar app; placeholder expanded `NSPanel` | 3–5 days | **In progress** — `NotchPillController`, `HUDPanelController` |
-| **M2** | `connectNative` in shim; host ↔ app IPC; `hud install`; `panel-mode hud` | 1–2 weeks | Host stub + manifest install |
-| **M3** | WKWebView chat via bridge page; page context; ⌘E routes to HUD | 2–3 weeks | Design above |
+| **M1** | DynamicNotchKit pill + menu bar app; placeholder expanded `NSPanel` | 3–5 days | **Done** — `NotchPillController`, `HUDPanelController` |
+| **M2** | `connectNative` in shim; host ↔ app IPC; `hud install`; `panel-mode hud` | 1–2 weeks | **Done** — native messaging + `panel-mode hud` |
+| **M3** | WKWebView chat via bridge page; page context; ⌘E routes to HUD | 2–3 weeks | **Done (v1.2.25)** — `claude-arc-hud-bridge.html`, `claude-in-arc-ext://` scheme + chrome polyfill |
 | **M4** | Multi-display, signing/notarization, `doctor` HUD checks, polish | 1–2 weeks | — |
 
 **Total Phase 2:** ~6–10 weeks part-time after M1 dogfood.
@@ -232,16 +232,26 @@ cd native/ClaudeInArcHUD && swift build
 .build/debug/ClaudeInArcHUD
 ```
 
-**Expect:** Collapsed DynamicNotchKit pill + menu-bar toggle; expanded panel is placeholder text. Extension wire-up lands in M2.
+**Expect:** Collapsed DynamicNotchKit pill + menu-bar toggle; ⌘E in `panel-mode hud` expands a floating panel with real Claude chat (WKWebView + extension bridge). Requires `claude-in-arc install`, `hud install`, and extension reload.
+
+### M3 reinstall / test steps
+
+```bash
+claude-in-arc install --panel-mode hud   # or: claude-in-arc config --panel-mode hud && claude-in-arc install
+claude-in-arc hud build
+claude-in-arc hud install
+claude-in-arc hud open                   # menu-bar app + collapsed pill
+# arc://extensions → Reload Claude in Arc
+# Browse in Arc, press ⌘E — HUD panel expands with Claude chat + page context (tabId)
+```
 
 ---
 
 ## What to build next
 
-1. **M2:** `DistributedNotificationCenter` bridge host → app; shim `connectNative("com.claudeinarac.hud")` behind feature flag
-2. **M2:** `config --panel-mode hud` — disable split popup when HUD active
-3. **M3:** `claude-arc-hud-bridge.html` + WKWebView in `HUDPanelController`
-4. **M4:** `doctor` section for HUD manifest + binary path; ad-hoc `codesign` docs
+1. **M4:** Multi-display Arc window follow; `doctor` section for HUD manifest + binary path; ad-hoc `codesign` docs
+2. **M4:** Expand chrome polyfill coverage if upstream sidepanel adds new APIs
+3. **M4:** Optional WKWebView in notch expanded view (chat currently in floating panel)
 
 ---
 

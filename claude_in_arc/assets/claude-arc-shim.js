@@ -40,7 +40,7 @@
   "use strict";
 
   var LOG_PREFIX = "[claude-in-arc]";
-  var SHIM_VERSION = "1.2.24";
+  var SHIM_VERSION = "1.2.25";
 
   function log() {
     try {
@@ -503,12 +503,109 @@
       case "request_page_context":
         pushActivePageContext();
         break;
+      case "hud_chrome_call":
+        handleHudChromeCall(msg);
+        break;
       case "hud_expanded":
       case "hud_collapsed":
       case "pong":
         break;
       default:
         log("HUD host message type=" + msg.type);
+    }
+  }
+
+  function replyHudChrome(requestId, result, error) {
+    if (!requestId) return;
+    sendHudMessage({
+      v: 1,
+      dir: "ext_to_host",
+      type: "hud_chrome_response",
+      requestId: requestId,
+      result: result == null ? null : result,
+      error: error || null,
+    });
+  }
+
+  function handleHudChromeCall(msg) {
+    var requestId = msg.requestId;
+    var method = msg.method;
+    var args = msg.args || [];
+    if (!requestId || !method) return;
+
+    function fail(message) {
+      replyHudChrome(requestId, null, message || "hud chrome call failed");
+    }
+
+    try {
+      switch (method) {
+        case "runtime.sendMessage":
+          chrome.runtime.sendMessage(args[0], function (response) {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, response, null);
+          });
+          return;
+        case "storage.local.get":
+        case "storage.session.get":
+        case "storage.sync.get": {
+          var area = method.split(".")[1];
+          var store = chrome.storage && chrome.storage[area];
+          if (!store || !store.get) return fail("storage." + area + " unavailable");
+          store.get(args[0], function (items) {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, items || {}, null);
+          });
+          return;
+        }
+        case "storage.local.set":
+        case "storage.session.set":
+        case "storage.sync.set": {
+          var areaSet = method.split(".")[1];
+          var storeSet = chrome.storage && chrome.storage[areaSet];
+          if (!storeSet || !storeSet.set) return fail("storage." + areaSet + " unavailable");
+          storeSet.set(args[0], function () {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, true, null);
+          });
+          return;
+        }
+        case "storage.local.remove":
+        case "storage.session.remove":
+        case "storage.sync.remove": {
+          var areaRm = method.split(".")[1];
+          var storeRm = chrome.storage && chrome.storage[areaRm];
+          if (!storeRm || !storeRm.remove) return fail("storage." + areaRm + " unavailable");
+          storeRm.remove(args[0], function () {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, true, null);
+          });
+          return;
+        }
+        case "tabs.query":
+          if (!chrome.tabs || !chrome.tabs.query) return fail("tabs.query unavailable");
+          chrome.tabs.query(args[0] || {}, function (tabs) {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, tabs || [], null);
+          });
+          return;
+        case "tabs.get":
+          if (!chrome.tabs || !chrome.tabs.get) return fail("tabs.get unavailable");
+          chrome.tabs.get(args[0], function (tab) {
+            var err = chrome.runtime.lastError;
+            if (err) fail(err.message || String(err));
+            else replyHudChrome(requestId, tab || null, null);
+          });
+          return;
+        default:
+          fail("unsupported hud chrome method: " + method);
+      }
+    } catch (e) {
+      fail(e && e.message ? e.message : String(e));
     }
   }
 

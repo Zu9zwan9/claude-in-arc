@@ -605,7 +605,7 @@ async function main() {
 
   // --- Scenario 10: shim exposes SHIM_VERSION ---------------------------------
   {
-    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.23"') !== -1, "shim must declare SHIM_VERSION 1.2.23");
+    assert(SHIM_SRC.indexOf('SHIM_VERSION = "1.2.25"') !== -1, "shim must declare SHIM_VERSION 1.2.25");
     assert(
       SHIM_SRC.indexOf("shouldSkipNormalWindowFallback") !== -1,
       "shim must skip type=normal windows.create on Arc"

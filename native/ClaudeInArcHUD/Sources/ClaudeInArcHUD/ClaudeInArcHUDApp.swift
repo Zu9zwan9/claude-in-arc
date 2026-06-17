@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             panel.show()
             pill.expand()
+            panel.focusChatInput()
         }
     }
 }

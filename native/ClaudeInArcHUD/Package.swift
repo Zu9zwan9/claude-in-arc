@@ -21,7 +21,10 @@ let package = Package(
             dependencies: [
                 .product(name: "DynamicNotchKit", package: "DynamicNotchKit"),
             ],
-            path: "Sources/ClaudeInArcHUDCore"
+            path: "Sources/ClaudeInArcHUDCore",
+            linkerSettings: [
+                .linkedFramework("WebKit"),
+            ]
         ),
         .executableTarget(
             name: "ClaudeInArcHUD",

@@ -20,14 +20,18 @@
             "toggle_hud",
             "set_collapsed",
             "page_context",
-            "sidebar_state"
+            "sidebar_state",
+            "hud_chrome_response"
           ]
         },
         "tabId": { "type": "integer" },
         "collapsed": { "type": "boolean" },
         "url": { "type": "string", "format": "uri" },
         "title": { "type": "string" },
-        "visible": { "type": "boolean" }
+        "visible": { "type": "boolean" },
+        "requestId": { "type": "string" },
+        "result": {},
+        "error": { "type": ["string", "null"] }
       },
       "additionalProperties": false
     },
@@ -44,10 +48,14 @@
             "hud_expanded",
             "hud_collapsed",
             "open_sidepanel",
-            "request_page_context"
+            "request_page_context",
+            "hud_chrome_call"
           ]
         },
-        "expanded": { "type": "boolean" }
+        "expanded": { "type": "boolean" },
+        "requestId": { "type": "string" },
+        "method": { "type": "string" },
+        "args": { "type": "array" }
       },
       "additionalProperties": false
     }

@@ -112,6 +112,9 @@ class PatchEngineTests(unittest.TestCase):
         self.assertTrue((result.build_dir / core.SHIM_FILENAME).is_file())
         self.assertTrue((result.build_dir / core.SIDEBAR_BRIDGE_FILENAME).is_file())
         self.assertTrue((result.build_dir / core.SIDEBAR_BRIDGE_JS_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.HUD_BRIDGE_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.HUD_BRIDGE_JS_FILENAME).is_file())
+        self.assertTrue((result.build_dir / core.HUD_CHROME_POLYFILL_FILENAME).is_file())
         self.assertTrue((result.build_dir / core.SIDEBAR_HOST_FILENAME).is_file())
         # Original loader and worker preserved untouched.
         self.assertTrue((result.build_dir / "service-worker-loader.js").is_file())
@@ -281,7 +284,7 @@ class PatchEngineTests(unittest.TestCase):
         self.assertIn("SPLIT_INJECT_SETTLE_MS", shim)
 
     def test_shim_version_and_hash_helpers(self):
-        self.assertEqual(core.shim_version_label(), "1.2.24")
+        self.assertEqual(core.shim_version_label(), "1.2.25")
         h = core.shim_content_hash()
         self.assertEqual(len(h), 12)
         self.assertTrue(all(c in "0123456789abcdef" for c in h))
@@ -736,7 +739,7 @@ class UpgradeTests(unittest.TestCase):
             core, "_arc_click_reload_extension", return_value=(False, "reload_not_found")
         ), patch.object(core, "_open_url_in_arc", return_value=True), patch.object(
             core, "_arc_send_toggle_side_panel", return_value=(True, "sent")
-        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.23")):
+        ), patch.object(core, "_verify_installed_shim", return_value=(True, "claude-arc-shim v1.2.25")):
             rc = core.cmd_upgrade(args)
         self.assertEqual(rc, core.EXIT_ERROR)
 

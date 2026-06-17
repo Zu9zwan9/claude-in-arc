@@ -3,7 +3,7 @@ import DynamicNotchKit
 import SwiftUI
 
 /// Collapsed Dynamic Island–style pill via DynamicNotchKit (MIT).
-/// Expanded chat still uses `HUDPanelController` until M3 embeds WKWebView.
+/// Expanded notch shows page context; chat lives in `HUDPanelController` (WKWebView).
 @MainActor
 public final class NotchPillController: ObservableObject {
     @Published public private(set) var isExpanded = false
@@ -123,7 +123,7 @@ private struct NotchExpandedView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
-            Text("Chat bridge (M3)")
+            Text("Press ⌘E or use the panel below")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }
